@@ -1,6 +1,5 @@
 import { renderMarkdown } from "./renderer.ts";
 
-const SLACK_SIGNING_SECRET = Deno.env.get("SLACK_SIGNING_SECRET") || "";
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN") || "";
 const SLACK_CLIENT_ID = Deno.env.get("SLACK_CLIENT_ID") || "";
 const SLACK_CLIENT_SECRET = Deno.env.get("SLACK_CLIENT_SECRET") || "";
@@ -18,30 +17,6 @@ interface RenderEntry {
 const HTML_TEMPLATE = await Deno.readTextFile(
   new URL("./templates/render.html", import.meta.url),
 );
-
-function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let result = 0;
-  for (let i = 0; i < a.length; i++) result |= a[i] ^ b[i];
-  return result === 0;
-}
-
-async function verifySlackRequest(
-  body: string,
-  timestamp: string,
-  signature: string,
-): Promise<boolean> {
-  const sigBaseString = `v0:${timestamp}:${body}`;
-  const encoder = new TextEncoder();
-  const data = encoder.encode(sigBaseString);
-
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  const hashHex = Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  const expected = `v0=${hashHex}`;
-  return timingSafeEqual(encoder.encode(expected), encoder.encode(signature));
-}
 
 function callSlackApi(
   method: string,
@@ -290,40 +265,34 @@ async function handleOAuthCallback(url: URL): Promise<Response> {
 async function handleSlackRequest(req: Request): Promise<Response> {
   const rawBody = await req.text();
 
-  const timestamp = req.headers.get("x-slack-request-timestamp") || "";
-  const signature = req.headers.get("x-slack-signature") || "";
-
-  if (SLACK_SIGNING_SECRET && !(await verifySlackRequest(rawBody, timestamp, signature))) {
-    return new Response("Unauthorized", { status: 401 });
+  // Handle Slack SSL verification (ssl_check=1)
+  if (rawBody.trim() === "ssl_check=1") {
+    return new Response("OK", { status: 200 });
   }
 
-  let payload: Record<string, unknown>;
-
-  const ct = req.headers.get("content-type") || "";
-
-  if (ct.includes("application/x-www-form-urlencoded")) {
+  // Handle form-encoded payload (message shortcuts, file actions)
+  if (req.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
     const params = new URLSearchParams(rawBody);
-    const payloadStr = params.get("payload") || "";
-    payload = JSON.parse(payloadStr);
-  } else {
-    payload = JSON.parse(rawBody);
+    const payloadStr = params.get("payload");
+    if (!payloadStr) {
+      return new Response("OK", { status: 200 });
+    }
+    const payload = JSON.parse(payloadStr);
+
+    const isRelevant = payload.callback_id === "render_md_file";
+    if (isRelevant) {
+      handleFileAction(payload);
+    }
+    return new Response("", { status: 200 });
   }
 
-  // URL verification challenge
+  // Handle JSON body (Events API, url_verification)
+  const payload = JSON.parse(rawBody);
+
   if (payload.type === "url_verification") {
-    return new Response(payload.challenge as string, {
+    return new Response(payload.challenge, {
       headers: { "Content-Type": "text/plain" },
     });
-  }
-
-  // Handle message shortcuts & file actions
-  const isRelevant =
-    (payload.type === "shortcut" && payload.callback_id === "render_md_file") ||
-    (payload.type === "message_action" && payload.callback_id === "render_md_file");
-
-  if (isRelevant) {
-    handleFileAction(payload);
-    return new Response("", { status: 200 });
   }
 
   return new Response("OK", { status: 200 });
