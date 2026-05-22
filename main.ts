@@ -105,10 +105,29 @@ async function downloadFileContent(
   fileId: string,
   userToken: string,
 ): Promise<string | null> {
-  // Try user token first with files.info
+  // Try user token with files.info
   const infoResp = await callSlackApi(userToken, "files.info", { file: fileId });
   const info = await infoResp.json();
   if (info.ok) {
+    // Log all file fields to find content-bearing ones
+    console.error("files.info file keys:", Object.keys(info.file).join(", "));
+
+    // Check various content fields
+    const fileContent = info.file?.content as string | undefined;
+    const filePlainText = info.file?.plain_text as string | undefined;
+    const filePreviewHighlight = info.file?.preview_highlight as string | undefined;
+    if (fileContent) {
+      console.error("files.info has 'content' field, len:", fileContent.length);
+      return fileContent;
+    }
+    if (filePlainText) {
+      console.error("files.info has 'plain_text' field, len:", filePlainText.length);
+      return filePlainText;
+    }
+    if (filePreviewHighlight) {
+      console.error("files.info has 'preview_highlight' field, len:", filePreviewHighlight.length);
+    }
+
     const preview = info.file?.preview as string | undefined;
     const isTruncated = info.file?.preview_is_truncated;
     const urlPrivate = info.file?.url_private as string | undefined;
