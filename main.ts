@@ -105,26 +105,25 @@ async function downloadFileContent(
   fileId: string,
   userToken: string,
 ): Promise<string | null> {
-  // Try files.info
+  // Try files.info to get the download URL
   const infoResp = await callSlackApi(userToken, "files.info", { file: fileId });
   const info = await infoResp.json();
   if (info.ok) {
     const url = info.file?.url_private_download || info.file?.url_private;
 
-    // Debug the CDN response in detail
     if (url) {
-      console.error("CDN URL:", url);
-      // Try without token param first
-      const resp1 = await fetch(url, {
+      console.error("Downloading file via CDN with Bearer auth");
+      const cdnResp = await fetch(url, {
         headers: { Authorization: `Bearer ${userToken}` },
       });
-      console.error("CDN Bearer auth: status", resp1.status, "type:", resp1.headers.get("content-type"));
-      // Try with token param
-      const resp2 = await fetch(`${url}?token=${userToken}`);
-      console.error("CDN ?token=: status", resp2.status, "type:", resp2.headers.get("content-type"));
-      // Try raw (no auth)
-      const resp3 = await fetch(url);
-      console.error("CDN no auth: status", resp3.status, "type:", resp3.headers.get("content-type"));
+      if (cdnResp.ok) {
+        const text = await cdnResp.text();
+        if (text.length > 0 && !text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
+          console.error("CDN download succeeded, content length:", text.length);
+          return text;
+        }
+      }
+      console.error("CDN download failed:", cdnResp.status, cdnResp.headers.get("content-type"));
     }
 
     // Fall back to preview
