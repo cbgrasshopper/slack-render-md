@@ -3,7 +3,8 @@ import { renderMarkdown } from "./renderer.ts";
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN") || "";
 const SLACK_CLIENT_ID = Deno.env.get("SLACK_CLIENT_ID") || "";
 const SLACK_CLIENT_SECRET = Deno.env.get("SLACK_CLIENT_SECRET") || "";
-const RENDERER_BASE = Deno.env.get("RENDERER_BASE") || "";
+const RENDERER_BASE = Deno.env.get("RENDERER_BASE") ||
+  "https://slack-render-md.aliveonline.deno.net";
 
 const kv = await Deno.openKv();
 const RENDER_TTL = 60 * 60 * 1000;
