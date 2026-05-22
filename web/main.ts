@@ -1,4 +1,3 @@
-import { serve } from "./deps.ts";
 import { renderMarkdown } from "./renderer.ts";
 
 interface RenderEntry {
@@ -79,7 +78,7 @@ function handleHome(): Response {
   });
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   const url = new URL(req.url);
 
   if (url.pathname === "/api/render") {
