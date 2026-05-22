@@ -167,24 +167,70 @@ async function renderOneFile(
   const html = await renderMarkdown(content, fileName);
   const id = crypto.randomUUID();
 
-  // Create preview: extract text with line breaks preserved
-  const preview = html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n\n")
-    .replace(/<\/h[1-6]>/gi, "\n\n")
-    .replace(/<\/li>/gi, "\n")
-    .replace(/<\/tr>/gi, "\n")
-    .replace(/<\/blockquote>/gi, "\n\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#8203;/g, "")
-    .replace(/\n{4,}/g, "\n\n\n")
-    .trim()
-    .substring(0, 2000);
+  // Convert HTML to Slack mrkdwn
+  function htmlToSlack(html: string): string {
+    let s = html;
+
+    // 1. Inline formatting (do before block-level to preserve structure)
+    s = s
+      .replace(/<(?:strong|b)>/gi, "*")
+      .replace(/<\/(?:strong|b)>/gi, "*")
+      .replace(/<(?:em|i)>/gi, "_")
+      .replace(/<\/(?:em|i)>/gi, "_")
+      .replace(/<(?:del|s|strike)>/gi, "~")
+      .replace(/<\/(?:del|s|strike)>/gi, "~")
+      .replace(/<code>/gi, "`")
+      .replace(/<\/code>/gi, "`")
+      .replace(/<blockquote>/gi, ">");
+
+    // 2. Links: extract text from <a> tags
+    s = s.replace(/<a\s[^>]*>([\s\S]*?)<\/a>/gi, "$1");
+
+    // 3. Headings: wrap content in bold
+    s = s
+      .replace(/<h[1-6][^>]*>/gi, "*")
+      .replace(/<\/h[1-6]>/gi, "*");
+
+    // 4. Block-level elements → newlines
+    s = s
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<p>/gi, "")
+      .replace(/<\/p>/gi, "\n\n")
+      .replace(/<\/h[1-6]>/gi, "\n\n")
+      .replace(/<li>/gi, "  \n")
+      .replace(/<\/li>/gi, "")
+      .replace(/<\/ol>/gi, "\n")
+      .replace(/<\/ul>/gi, "\n")
+      .replace(/<\/tr>/gi, "\n")
+      .replace(/<\/blockquote>/gi, "\n\n")
+      .replace(/<\/div>/gi, "\n")
+      .replace(/<\/dt>/gi, "\n")
+      .replace(/<\/dd>/gi, "\n")
+      .replace(/<hr\s*\/?>/gi, "\n---\n");
+
+    // 5. Remove remaining tags
+    s = s.replace(/<[^>]+>/g, "");
+
+    // 6. Decode HTML entities
+    s = s
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#8203;/g, "")
+      .replace(/&#8217;/g, "'");
+
+    // 7. Collapse excessive whitespace
+    s = s
+      .replace(/\n{4,}/g, "\n\n\n")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n[ \t]+/g, "\n");
+
+    return s.trim().substring(0, 2000);
+  }
+
+  const preview = htmlToSlack(html);
 
   const entry: RenderEntry = { filename: fileName, html, preview, created: Date.now() };
   await kv.set(["renders", id], entry, { expireIn: RENDER_TTL });
