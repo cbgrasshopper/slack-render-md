@@ -72,31 +72,39 @@ async function handleRenderApi(req: Request): Promise<Response> {
 
 interface MdFile {
   name: string;
-  id: string;
+  downloadUrl: string;
 }
 
 async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> {
-  // If files are directly in the payload (file actions), use them
+  function isMd(f: Record<string, unknown>): boolean {
+    return typeof f.name === "string" &&
+      (f.name.endsWith(".md") || f.name.endsWith(".markdown"));
+  }
+
+  function toMdFile(f: Record<string, unknown>): MdFile {
+    return {
+      name: f.name as string,
+      downloadUrl: (f.url_private_download || f.url_private) as string,
+    };
+  }
+
+  // Check payload.file (file actions)
   if (payload.file) {
     const f = payload.file as Record<string, unknown>;
-    if (typeof f.name === "string" && (f.name.endsWith(".md") || f.name.endsWith(".markdown"))) {
-      return [{ name: f.name as string, id: f.id as string }];
+    if (isMd(f) && (f.url_private_download || f.url_private)) {
+      return [toMdFile(f)];
     }
   }
 
-  // If files are in the message payload (some shortcut payloads include them)
+  // Check payload.message.files (some payloads include files)
   const message = payload.message as Record<string, unknown> | undefined;
   if (message?.files) {
     const files = message.files as Record<string, unknown>[];
-    return files
-      .filter((f) =>
-        typeof f.name === "string" &&
-        (f.name.endsWith(".md") || f.name.endsWith(".markdown"))
-      )
-      .map((f) => ({ name: f.name as string, id: f.id as string }));
+    const found = files.filter(isMd).filter((f) => f.url_private_download || f.url_private);
+    if (found.length > 0) return found.map(toMdFile);
   }
 
-  // Fallback: fetch the message via API to find files
+  // Fetch message via API to get file download URLs
   const channelId = ((payload.channel as Record<string, unknown>)?.id as string) ||
     (payload.channel_id as string) || "";
   const messageTs = (payload.message_ts as string) || (message?.ts as string) || "";
@@ -111,40 +119,33 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
   });
   const data = await resp.json();
 
-  if (!data.ok || !data.messages || data.messages.length === 0) return [];
+  if (!data.ok || !data.messages || data.messages.length === 0) {
+    console.error("conversations.history failed:", data);
+    return [];
+  }
 
   const msgFiles = data.messages[0].files as Record<string, unknown>[] | undefined;
   if (!msgFiles) return [];
 
   return msgFiles
-    .filter((f) =>
-      typeof f.name === "string" &&
-      (f.name.endsWith(".md") || f.name.endsWith(".markdown"))
-    )
-    .map((f) => ({ name: f.name as string, id: f.id as string }));
+    .filter(isMd)
+    .filter((f) => f.url_private_download || f.url_private)
+    .map(toMdFile);
 }
 
 async function renderOneFile(
   file: MdFile,
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  const fileInfoResp = await callSlackApi("files.info", { file: file.id });
-  const fileInfo = await fileInfoResp.json();
-
-  if (!fileInfo.ok) {
-    return { ok: false, error: `Could not get info for "${file.name}".` };
+  if (!file.downloadUrl) {
+    return { ok: false, error: `No download URL for "${file.name}".` };
   }
 
-  const downloadUrl = fileInfo.file?.url_private_download ||
-    fileInfo.file?.url_private;
-  if (!downloadUrl) {
-    return { ok: false, error: `Could not get download URL for "${file.name}".` };
-  }
-
-  const fileContentResp = await fetch(downloadUrl, {
+  const fileContentResp = await fetch(file.downloadUrl, {
     headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` },
   });
 
   if (!fileContentResp.ok) {
+    console.error("File download failed:", file.downloadUrl, fileContentResp.status);
     return { ok: false, error: `Failed to download "${file.name}".` };
   }
 
