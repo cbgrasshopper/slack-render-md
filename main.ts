@@ -158,28 +158,60 @@ async function renderOneFile(
   return { ok: true, id };
 }
 
-async function handleFileAction(
+async function respond(
   payload: Record<string, unknown>,
+  text: string,
+  blocks: unknown[],
 ): Promise<void> {
+  // Prefer response_url when available (message shortcuts provide it)
+  const responseUrl = payload.response_url as string | undefined;
+  if (responseUrl) {
+    await fetch(responseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, blocks, response_type: "ephemeral" }),
+    });
+    return;
+  }
+
   const user = payload.user as Record<string, unknown> | undefined;
   const channel = payload.channel as Record<string, unknown> | undefined;
   const userId = (user?.id as string) || "";
   const channelId = (channel?.id as string) || "";
 
+  await callSlackApi("chat.postEphemeral", {
+    channel: channelId,
+    user: userId,
+    text,
+    blocks,
+  });
+}
+
+async function handleFileAction(
+  payload: Record<string, unknown>,
+): Promise<void> {
+  console.error("=== handleFileAction called ===");
+  console.error("Payload keys:", Object.keys(payload).join(", "));
+  console.error("callback_id:", payload.callback_id);
+
+  const user = payload.user as Record<string, unknown> | undefined;
+  const channel = payload.channel as Record<string, unknown> | undefined;
+  const userId = (user?.id as string) || "";
+  const channelId = (channel?.id as string) || "";
+
+  console.error("user:", userId, "channel:", channelId);
+
   if (!channelId || !userId) {
-    console.error("Missing channel or user in payload:", JSON.stringify(payload));
+    console.error("Missing channel or user");
     return;
   }
 
   const mdFiles = await findMdFiles(payload);
 
+  console.error("Found .md files:", mdFiles.length);
+
   if (mdFiles.length === 0) {
-    console.error("No .md files found in payload:", JSON.stringify(payload, null, 2));
-    await callSlackApi("chat.postEphemeral", {
-      channel: channelId,
-      user: userId,
-      text: "No Markdown files (.md) found in this message.",
-    });
+    await respond(payload, "No Markdown files (.md) found in this message.", []);
     return;
   }
 
@@ -188,13 +220,11 @@ async function handleFileAction(
   const okResults = results.filter((r): r is { ok: true; id: string } => r.ok);
   const errors = results.filter((r): r is { ok: false; error: string } => !r.ok);
 
+  console.error("okResults:", okResults.length, "errors:", errors.length);
+
   if (okResults.length === 0 && errors.length > 0) {
     const text = errors.map((e) => `❌ ${e.error}`).join("\n");
-    await callSlackApi("chat.postEphemeral", {
-      channel: channelId,
-      user: userId,
-      text,
-    });
+    await respond(payload, text, []);
     return;
   }
 
@@ -256,12 +286,7 @@ async function handleFileAction(
     });
   }
 
-  await callSlackApi("chat.postEphemeral", {
-    channel: channelId,
-    user: userId,
-    text: `Rendered ${okResults.length} Markdown file(s)`,
-    blocks,
-  });
+  await respond(payload, `Rendered ${okResults.length} Markdown file(s)`, blocks);
 }
 
 function handleOAuthInstall(): Response {
@@ -334,6 +359,8 @@ async function handleSlackRequest(req: Request): Promise<Response> {
   if (
     req.headers.get("content-type")?.includes("application/x-www-form-urlencoded")
   ) {
+    console.error("Form-encoded request body:", rawBody.substring(0, 200));
+
     const params = new URLSearchParams(rawBody);
     const payloadStr = params.get("payload");
     if (!payloadStr) {
@@ -346,6 +373,8 @@ async function handleSlackRequest(req: Request): Promise<Response> {
     } catch {
       return new Response("OK", { status: 200 });
     }
+
+    console.error("Payload type:", payload.type, "callback:", payload.callback_id);
 
     if (payload.callback_id === "render_md_file") {
       handleFileAction(payload).catch((err) =>
@@ -409,27 +438,48 @@ function handleHome(): Response {
   });
 }
 
+function handleDebug(): Response {
+  const info = {
+    status: "ok",
+    env: {
+      hasBotToken: !!SLACK_BOT_TOKEN,
+      botTokenPrefix: SLACK_BOT_TOKEN ? SLACK_BOT_TOKEN.substring(0, 10) + "..." : "",
+      hasClientId: !!SLACK_CLIENT_ID,
+      hasClientSecret: !!SLACK_CLIENT_SECRET,
+      rendererBase: RENDERER_BASE,
+    },
+  };
+
+  return Response.json(info);
+}
+
 Deno.serve(async (req) => {
   const url = new URL(req.url);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
 
-  if (url.pathname === "/slack/events") {
+  if (path === "/debug") {
+    return handleDebug();
+  }
+
+  // Any request to /slack/* goes to the Slack handler
+  if (path.startsWith("/slack/events")) {
     return await handleSlackRequest(req);
   }
 
-  if (url.pathname === "/slack/install") {
+  if (path === "/slack/install") {
     return handleOAuthInstall();
   }
 
-  if (url.pathname === "/slack/oauth_redirect") {
+  if (path === "/slack/oauth_redirect") {
     return await handleOAuthCallback(url);
   }
 
-  if (url.pathname === "/api/render") {
+  if (path === "/api/render") {
     return await handleRenderApi(req);
   }
 
-  if (url.pathname.startsWith("/render/")) {
-    const id = url.pathname.split("/").pop() || "";
+  if (path.startsWith("/render/")) {
+    const id = path.split("/").pop() || "";
     return await handleViewRender(id);
   }
 
