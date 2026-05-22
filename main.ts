@@ -124,31 +124,22 @@ async function downloadFileContent(
       console.error("files.info has 'plain_text' field, len:", filePlainText.length);
       return filePlainText;
     }
+    // preview_highlight contains the full content as HTML-highlighted text
     if (filePreviewHighlight) {
-      console.error("files.info has 'preview_highlight' field, len:", filePreviewHighlight.length);
+      console.error("preview_highlight len:", filePreviewHighlight.length);
+      // Strip HTML tags to get plain text content, decode entities
+      const plainText = filePreviewHighlight
+        .replace(/<[^>]+>/g, "")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+      console.error("Extracted text length:", plainText.length);
+      return plainText;
     }
 
     const preview = info.file?.preview as string | undefined;
-    const isTruncated = info.file?.preview_is_truncated;
-    const urlPrivate = info.file?.url_private as string | undefined;
-    const urlDownload = info.file?.url_private_download as string | undefined;
-    console.error("files.info with user token: ok, preview len:", preview?.length, "truncated:", isTruncated);
-
-    // Try CDN download with user token if preview is truncated
-    if (isTruncated && (urlPrivate || urlDownload)) {
-      const url = urlDownload || urlPrivate;
-      console.error("Preview truncated, downloading via CDN with user token:", url?.substring(0, 80));
-      const cdnResp = await fetch(`${url}?token=${userToken}`);
-      if (cdnResp.ok) {
-        const text = await cdnResp.text();
-        if (!text.startsWith("<!DOCTYPE") && !text.startsWith("<html") && text.length > (preview?.length || 0)) {
-          console.error("CDN download with user token succeeded, len:", text.length);
-          return text;
-        }
-        console.error("CDN returned HTML or short content, len:", text.length);
-      }
-    }
-
     if (preview) return preview;
   }
   console.error("files.info with user token failed:", info.error);
