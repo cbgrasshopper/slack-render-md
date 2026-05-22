@@ -316,11 +316,12 @@ async function handleSlackRequest(req: Request): Promise<Response> {
     });
   }
 
-  // Handle file shortcuts & actions
-  if (
-    payload.type === "shortcut" &&
-    (payload.callback_id === "render_md_file")
-  ) {
+  // Handle message shortcuts & file actions
+  const isRelevant =
+    (payload.type === "shortcut" && payload.callback_id === "render_md_file") ||
+    (payload.type === "message_action" && payload.callback_id === "render_md_file");
+
+  if (isRelevant) {
     handleFileAction(payload);
     return new Response("", { status: 200 });
   }
