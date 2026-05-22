@@ -74,6 +74,7 @@ async function handleRenderApi(req: Request): Promise<Response> {
 interface MdFile {
   name: string;
   downloadUrl: string;
+  fallbackUrl: string;
 }
 
 async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> {
@@ -86,6 +87,7 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
     return {
       name: f.name as string,
       downloadUrl: (f.url_private_download || f.url_private) as string,
+      fallbackUrl: f.url_private as string || f.url_private_download as string,
     };
   }
 
@@ -141,17 +143,47 @@ async function renderOneFile(
     return { ok: false, error: `No download URL for "${file.name}".` };
   }
 
-  const fileContentResp = await fetch(file.downloadUrl, {
-    headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` },
-  });
-
-  if (!fileContentResp.ok) {
-    console.error("File download failed:", file.downloadUrl, fileContentResp.status);
-    return { ok: false, error: `Failed to download "${file.name}".` };
+  async function tryDownload(url: string, label: string): Promise<string | null> {
+    const resp = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+        Accept: "text/plain, text/markdown, */*",
+      },
+    });
+    if (!resp.ok) {
+      console.error(`${label} download failed:`, resp.status);
+      return null;
+    }
+    const text = await resp.text();
+    console.error(`${label} length:`, text.length, "starts with:", text.substring(0, 100));
+    if (text.startsWith("<!DOCTYPE") || text.startsWith("<html")) {
+      console.error(`${label} is HTML page, logging full response to debug`);
+      // Log key parts of the HTML to understand its structure
+      const bodyMatch = text.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+      if (bodyMatch) {
+        const body = bodyMatch[1];
+        console.error("HTML body (first 2000 chars):", body.substring(0, 2000));
+        // Look for pre/code tags that might contain the file content
+        const preMatch = text.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+        if (preMatch) {
+          console.error("Found <pre> content (first 500):", preMatch[1].substring(0, 500));
+        }
+      }
+      return null;
+    }
+    return text;
   }
 
-  const fileContent = await fileContentResp.text();
-  console.error("File content length:", fileContent.length, "preview:", fileContent.substring(0, 200));
+  let fileContent = await tryDownload(file.downloadUrl, "primary");
+
+  if (!fileContent && file.fallbackUrl && file.fallbackUrl !== file.downloadUrl) {
+    console.error("Trying fallback URL:", file.fallbackUrl);
+    fileContent = await tryDownload(file.fallbackUrl, "fallback");
+  }
+
+  if (!fileContent) {
+    return { ok: false, error: `Could not download raw content for "${file.name}".` };
+  }
 
   const html = await renderMarkdown(fileContent, file.name);
   console.error("HTML length:", html.length, "preview:", html.substring(0, 200));
