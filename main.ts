@@ -307,14 +307,15 @@ async function handleFileAction(
         },
       });
 
-      // Show preview content (up to ~2000 chars, truncated to fit Slack limits)
-      const previewText = r.preview.substring(0, 1900);
+      // Show preview content as plain_text to avoid mrkdwn formatting issues
+      const previewText = r.preview.substring(0, 2900);
       if (previewText.length > 0) {
         modalBlocks.push({
           type: "section",
           text: {
-            type: "mrkdwn",
-            text: previewText.substring(0, 2900),
+            type: "plain_text",
+            text: previewText,
+            emoji: false,
           },
         });
       }
