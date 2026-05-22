@@ -105,34 +105,33 @@ async function downloadFileContent(
   fileId: string,
   userToken: string,
 ): Promise<string | null> {
-  // Try files.info with include_file_contents
-  for (const params of [{ file: fileId }, { file: fileId, include_file_contents: true }]) {
-    const infoResp = await callSlackApi(userToken, "files.info", params);
-    const info = await infoResp.json();
-    if (info.ok) {
-      const fileSize = info.file?.size as number | undefined;
-      const fileLines = info.file?.lines as number | undefined;
-      console.error("files.info ok, size:", fileSize, "lines:", fileLines, "param:", JSON.stringify(params));
+  // Try files.info
+  const infoResp = await callSlackApi(userToken, "files.info", { file: fileId });
+  const info = await infoResp.json();
+  if (info.ok) {
+    const url = info.file?.url_private_download || info.file?.url_private;
 
-      // Check for full content in various fields
-      for (const key of ["content", "plain_text", "preview_highlight", "preview", "text"]) {
-        const val = info.file?.[key];
-        if (val && typeof val === "string" && val.length > 0) {
-          console.error("Found content in:", key, "len:", val.length);
-          if (key === "preview_highlight") {
-            // Strip HTML tags to get plain text
-            const text = val.replace(/<[^>]+>/g, "")
-              .replace(/&amp;/g, "&")
-              .replace(/&lt;/g, "<")
-              .replace(/&gt;/g, ">")
-              .replace(/&quot;/g, '"')
-              .replace(/&#39;/g, "'");
-            if (text.length > 0) return text;
-          } else {
-            return val;
-          }
-        }
-      }
+    // Debug the CDN response in detail
+    if (url) {
+      console.error("CDN URL:", url);
+      // Try without token param first
+      const resp1 = await fetch(url, {
+        headers: { Authorization: `Bearer ${userToken}` },
+      });
+      console.error("CDN Bearer auth: status", resp1.status, "type:", resp1.headers.get("content-type"));
+      // Try with token param
+      const resp2 = await fetch(`${url}?token=${userToken}`);
+      console.error("CDN ?token=: status", resp2.status, "type:", resp2.headers.get("content-type"));
+      // Try raw (no auth)
+      const resp3 = await fetch(url);
+      console.error("CDN no auth: status", resp3.status, "type:", resp3.headers.get("content-type"));
+    }
+
+    // Fall back to preview
+    const preview = info.file?.preview as string | undefined;
+    if (preview) {
+      console.error("Using preview, len:", preview.length);
+      return preview;
     }
   }
 
