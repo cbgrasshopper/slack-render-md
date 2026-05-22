@@ -328,6 +328,7 @@ function handleOAuthInstall(): Response {
   const url =
     `https://slack.com/oauth/v2/authorize` +
     `?client_id=${SLACK_CLIENT_ID}` +
+    `&redirect_uri=${encodeURIComponent("https://slack-render-md.aliveonline.deno.net/slack/oauth_redirect")}` +
     `&scope=${botScopes}` +
     `&user_scope=${userScopes}`;
 
