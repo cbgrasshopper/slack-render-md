@@ -167,11 +167,18 @@ async function respond(
   // Prefer response_url when available (message shortcuts provide it)
   const responseUrl = payload.response_url as string | undefined;
   if (responseUrl) {
-    await fetch(responseUrl, {
+    console.error("Using response_url:", responseUrl);
+    const resp = await fetch(responseUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, blocks, response_type: "ephemeral" }),
     });
+    if (!resp.ok) {
+      const body = await resp.text();
+      console.error("response_url error:", resp.status, body);
+    } else {
+      console.error("response_url success:", resp.status);
+    }
     return;
   }
 
@@ -180,12 +187,19 @@ async function respond(
   const userId = (user?.id as string) || "";
   const channelId = (channel?.id as string) || "";
 
-  await callSlackApi("chat.postEphemeral", {
+  console.error("Using chat.postEphemeral fallback");
+  const resp = await callSlackApi("chat.postEphemeral", {
     channel: channelId,
     user: userId,
     text,
     blocks,
   });
+  const data = await resp.json();
+  if (!data.ok) {
+    console.error("chat.postEphemeral error:", data);
+  } else {
+    console.error("chat.postEphemeral success");
+  }
 }
 
 async function handleFileAction(
