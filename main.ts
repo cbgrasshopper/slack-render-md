@@ -25,7 +25,7 @@ function callSlackApi(
   return fetch(`https://slack.com/api/${method}`, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${SLACK_BOT_TOKEN}`,
+      Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(data),
@@ -60,7 +60,11 @@ async function handleRenderApi(req: Request): Promise<Response> {
   const html = await renderMarkdown(content, filename || "document.md");
   const id = crypto.randomUUID();
 
-  const entry: RenderEntry = { filename: filename || "document.md", html, created: Date.now() };
+  const entry: RenderEntry = {
+    filename: filename || "document.md",
+    html,
+    created: Date.now(),
+  };
   await kv.set(["renders", id], entry, { expireIn: RENDER_TTL });
 
   return Response.json({ id });
@@ -71,13 +75,48 @@ interface MdFile {
   id: string;
 }
 
-function findMdFiles(payload: Record<string, unknown>): MdFile[] {
-  const message = payload.message as Record<string, unknown> | undefined;
-  const rawFiles = payload.file
-    ? [payload.file as Record<string, unknown>]
-    : (message?.files as Record<string, unknown>[] | undefined) || [];
+async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> {
+  // If files are directly in the payload (file actions), use them
+  if (payload.file) {
+    const f = payload.file as Record<string, unknown>;
+    if (typeof f.name === "string" && (f.name.endsWith(".md") || f.name.endsWith(".markdown"))) {
+      return [{ name: f.name as string, id: f.id as string }];
+    }
+  }
 
-  return rawFiles
+  // If files are in the message payload (some shortcut payloads include them)
+  const message = payload.message as Record<string, unknown> | undefined;
+  if (message?.files) {
+    const files = message.files as Record<string, unknown>[];
+    return files
+      .filter((f) =>
+        typeof f.name === "string" &&
+        (f.name.endsWith(".md") || f.name.endsWith(".markdown"))
+      )
+      .map((f) => ({ name: f.name as string, id: f.id as string }));
+  }
+
+  // Fallback: fetch the message via API to find files
+  const channelId = ((payload.channel as Record<string, unknown>)?.id as string) ||
+    (payload.channel_id as string) || "";
+  const messageTs = (payload.message_ts as string) || (message?.ts as string) || "";
+
+  if (!channelId || !messageTs) return [];
+
+  const resp = await callSlackApi("conversations.history", {
+    channel: channelId,
+    latest: messageTs,
+    limit: 1,
+    inclusive: true,
+  });
+  const data = await resp.json();
+
+  if (!data.ok || !data.messages || data.messages.length === 0) return [];
+
+  const msgFiles = data.messages[0].files as Record<string, unknown>[] | undefined;
+  if (!msgFiles) return [];
+
+  return msgFiles
     .filter((f) =>
       typeof f.name === "string" &&
       (f.name.endsWith(".md") || f.name.endsWith(".markdown"))
@@ -85,7 +124,9 @@ function findMdFiles(payload: Record<string, unknown>): MdFile[] {
     .map((f) => ({ name: f.name as string, id: f.id as string }));
 }
 
-async function renderOneFile(file: MdFile): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+async function renderOneFile(
+  file: MdFile,
+): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
   const fileInfoResp = await callSlackApi("files.info", { file: file.id });
   const fileInfo = await fileInfoResp.json();
 
@@ -93,7 +134,8 @@ async function renderOneFile(file: MdFile): Promise<{ ok: true; id: string } | {
     return { ok: false, error: `Could not get info for "${file.name}".` };
   }
 
-  const downloadUrl = fileInfo.file?.url_private_download || fileInfo.file?.url_private;
+  const downloadUrl = fileInfo.file?.url_private_download ||
+    fileInfo.file?.url_private;
   if (!downloadUrl) {
     return { ok: false, error: `Could not get download URL for "${file.name}".` };
   }
@@ -116,21 +158,28 @@ async function renderOneFile(file: MdFile): Promise<{ ok: true; id: string } | {
   return { ok: true, id };
 }
 
-async function handleFileAction(payload: Record<string, unknown>): Promise<void> {
+async function handleFileAction(
+  payload: Record<string, unknown>,
+): Promise<void> {
   const user = payload.user as Record<string, unknown> | undefined;
   const channel = payload.channel as Record<string, unknown> | undefined;
   const userId = (user?.id as string) || "";
   const channelId = (channel?.id as string) || "";
 
-  const mdFiles = findMdFiles(payload);
+  if (!channelId || !userId) {
+    console.error("Missing channel or user in payload:", JSON.stringify(payload));
+    return;
+  }
+
+  const mdFiles = await findMdFiles(payload);
+
   if (mdFiles.length === 0) {
-    if (channelId && userId) {
-      await callSlackApi("chat.postEphemeral", {
-        channel: channelId,
-        user: userId,
-        text: "No Markdown files (.md) found in this message.",
-      });
-    }
+    console.error("No .md files found in payload:", JSON.stringify(payload, null, 2));
+    await callSlackApi("chat.postEphemeral", {
+      channel: channelId,
+      user: userId,
+      text: "No Markdown files (.md) found in this message.",
+    });
     return;
   }
 
@@ -217,7 +266,9 @@ async function handleFileAction(payload: Record<string, unknown>): Promise<void>
 
 function handleOAuthInstall(): Response {
   if (!SLACK_CLIENT_ID) {
-    return new Response("App not configured for OAuth install", { status: 501 });
+    return new Response("App not configured for OAuth install", {
+      status: 501,
+    });
   }
 
   const scopes = [
@@ -263,36 +314,58 @@ async function handleOAuthCallback(url: URL): Promise<Response> {
 }
 
 async function handleSlackRequest(req: Request): Promise<Response> {
+  // Handle GET requests for URL verification
+  if (req.method === "GET") {
+    const url = new URL(req.url);
+    if (url.searchParams.get("ssl_check") === "1") {
+      return new Response("OK", { status: 200 });
+    }
+    return new Response("OK", { status: 200 });
+  }
+
   const rawBody = await req.text();
 
-  // Handle Slack SSL verification (ssl_check=1)
+  // Handle SSL verification (POST with ssl_check=1)
   if (rawBody.trim() === "ssl_check=1") {
     return new Response("OK", { status: 200 });
   }
 
-  // Handle form-encoded payload (message shortcuts, file actions)
-  if (req.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
+  // Handle form-encoded payload (message shortcuts, actions)
+  if (
+    req.headers.get("content-type")?.includes("application/x-www-form-urlencoded")
+  ) {
     const params = new URLSearchParams(rawBody);
     const payloadStr = params.get("payload");
     if (!payloadStr) {
       return new Response("OK", { status: 200 });
     }
-    const payload = JSON.parse(payloadStr);
 
-    const isRelevant = payload.callback_id === "render_md_file";
-    if (isRelevant) {
-      handleFileAction(payload);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(payloadStr);
+    } catch {
+      return new Response("OK", { status: 200 });
+    }
+
+    if (payload.callback_id === "render_md_file") {
+      handleFileAction(payload).catch((err) =>
+        console.error("handleFileAction error:", err)
+      );
     }
     return new Response("", { status: 200 });
   }
 
   // Handle JSON body (Events API, url_verification)
-  const payload = JSON.parse(rawBody);
+  try {
+    const payload = JSON.parse(rawBody);
 
-  if (payload.type === "url_verification") {
-    return new Response(payload.challenge, {
-      headers: { "Content-Type": "text/plain" },
-    });
+    if (payload.type === "url_verification") {
+      return new Response(payload.challenge, {
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
+  } catch {
+    // ignore parse errors
   }
 
   return new Response("OK", { status: 200 });
