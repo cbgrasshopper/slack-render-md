@@ -51,10 +51,12 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
 
   function toMdFile(f: Record<string, unknown>): MdFile | null {
     const name = f.name as string;
-    const content = (f.preview as string) || (f.content as string);
+    const preview = f.preview as string | undefined;
+    const previewHighlight = f.preview_highlight as string | undefined;
+    const content = preview || previewHighlight || "";
     const cdnUrl = (f.url_private as string) || (f.url_private_download as string) || "";
     if (!content && !cdnUrl) return null;
-    return { name, content: content || "", cdnUrl };
+    return { name, content, cdnUrl };
   }
 
   // Check payload.file (file actions)
@@ -100,6 +102,16 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
 
   const msgFiles = data.messages[0].files as Record<string, unknown>[] | undefined;
   if (!msgFiles) return [];
+
+  // Log full file data to see available fields
+  for (const f of msgFiles) {
+    if (isMd(f)) {
+      console.error("File data keys:", Object.keys(f).join(", "));
+      console.error("File mimetype:", f.mimetype, "filetype:", f.filetype);
+      if (f.preview) console.error("Preview length:", (f.preview as string).length);
+      if (f.preview_highlight) console.error("Preview highlight length:", (f.preview_highlight as string).length);
+    }
+  }
 
   return msgFiles.filter(isMd).map(toMdFile).filter(Boolean) as MdFile[];
 }
