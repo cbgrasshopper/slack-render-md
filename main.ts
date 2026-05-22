@@ -23,13 +23,17 @@ function callSlackApi(
   method: string,
   data: Record<string, unknown>,
 ): Promise<Response> {
+  const body = new URLSearchParams();
+  for (const [key, value] of Object.entries(data)) {
+    body.set(key, String(value));
+  }
   return fetch(`https://slack.com/api/${method}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-      "Content-Type": "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: JSON.stringify(data),
+    body,
   });
 }
 
@@ -106,7 +110,21 @@ async function renderOneFile(
     return { ok: false, error: `Slack API error: ${fileInfo.error}` };
   }
 
-  const fileContent = fileInfo.file?.preview as string | undefined;
+  let fileContent = fileInfo.file?.preview as string | undefined;
+  const isTruncated = fileInfo.file?.preview_is_truncated;
+
+  // If preview is truncated (960 char limit), try downloading via CDN
+  if (isTruncated && fileInfo.file?.url_private) {
+    console.error("Preview truncated, trying CDN download with token param");
+    const cdnResp = await fetch(`${fileInfo.file.url_private}?token=${SLACK_BOT_TOKEN}`);
+    if (cdnResp.ok) {
+      const text = await cdnResp.text();
+      if (!text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
+        fileContent = text;
+      }
+    }
+  }
+
   if (!fileContent) {
     return { ok: false, error: `File "${file.name}" has no text preview.` };
   }
