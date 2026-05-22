@@ -7,8 +7,7 @@ export default Manifest({
   icon: "assets/default_new_app_icon.png",
   workflows: [RenderMdWorkflow],
   outgoingDomains: [
-    "render-md.deno.dev",
-    "slack.com",
+    "slack-render-md.aliveonline.deno.net",
     "cdn.jsdelivr.net",
   ],
   botScopes: [

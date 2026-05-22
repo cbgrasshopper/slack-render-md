@@ -20,11 +20,27 @@ async function handleRender(req: Request): Promise<Response> {
   }
 
   const body = await req.json();
-  const { filename, content } = body;
+  const { filename, download_url, token } = body;
 
-  if (!content || typeof content !== "string") {
-    return Response.json({ error: "Missing 'content' field" }, { status: 400 });
+  if (!download_url || typeof download_url !== "string") {
+    return Response.json({ error: "Missing 'download_url' field" }, {
+      status: 400,
+    });
   }
+
+  const fileResponse = await fetch(download_url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!fileResponse.ok) {
+    return Response.json({
+      error: `Failed to download file: ${fileResponse.status}`,
+    }, { status: 502 });
+  }
+
+  const content = await fileResponse.text();
 
   const html = await renderMarkdown(content, filename || "document.md");
   const id = crypto.randomUUID();
