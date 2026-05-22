@@ -186,17 +186,17 @@ async function renderOneFile(
     // 2. Links: extract text from <a> tags
     s = s.replace(/<a\s[^>]*>([\s\S]*?)<\/a>/gi, "$1");
 
-    // 3. Headings: wrap content in bold
+    // 3. Headings: wrap in bold on their own line
     s = s
-      .replace(/<h[1-6][^>]*>/gi, "*")
-      .replace(/<\/h[1-6]>/gi, "*");
+      .replace(/<h[1-6][^>]*>/gi, "\n*")
+      .replace(/<\/h[1-6]>/gi, "*\n");
 
     // 4. Block-level elements → newlines
     s = s
       .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<p>/gi, "")
       .replace(/<\/p>/gi, "\n\n")
-      .replace(/<\/h[1-6]>/gi, "\n\n")
+      // (headings handled in step 3 above)
       .replace(/<li>/gi, "  \n")
       .replace(/<\/li>/gi, "")
       .replace(/<\/ol>/gi, "\n")
