@@ -33,7 +33,7 @@ function callSlackApi(
 ): Promise<Response> {
   const body = new URLSearchParams();
   for (const [key, value] of Object.entries(data)) {
-    body.set(key, String(value));
+    body.set(key, typeof value === "object" ? JSON.stringify(value) : String(value));
   }
   return fetch(`https://slack.com/api/${method}`, {
     method: "POST",
@@ -278,34 +278,74 @@ async function handleFileAction(
     return;
   }
 
-  const blocks: unknown[] = [];
+  // Open a modal with the rendered content
+  const triggerId = payload.trigger_id as string | undefined;
+  if (triggerId) {
+    const modalBlocks: unknown[] = [];
 
-  const renderLinks = okResults.map((r) => {
-    const renderUrl = `${RENDERER_BASE}/render/${r.id}`;
-    return `<${renderUrl}|Open rendered file>`;
-  }).join("\n");
+    okResults.forEach((r) => {
+      const renderUrl = `${RENDERER_BASE}/render/${r.id}`;
+      modalBlocks.push(
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Rendered:*\n<${renderUrl}|Open rendered Markdown>`,
+          },
+        },
+      );
 
-  blocks.push({
-    type: "section",
-    text: {
-      type: "mrkdwn",
-      text: okResults.length === 1
-        ? `*Rendered:*\n${renderLinks}`
-        : `*Rendered ${okResults.length} Markdown files:*\n${renderLinks}`,
-    },
-  });
-
-  if (errors.length > 0) {
-    blocks.push({
-      type: "context",
-      elements: errors.map((e) => ({
-        type: "mrkdwn",
-        text: `\u26a0\ufe0f ${e.error}`,
-      })),
+      // Add a content preview using the rendered HTML (strip tags for preview)
+      // In the future, we can make the KV entry also store a plaintext preview
+      modalBlocks.push({
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: "_Full rendering includes: GFM tables, Mermaid diagrams, KaTeX math, syntax highlighting_",
+        }],
+      });
     });
-  }
 
-  await respond(payload, `Rendered ${okResults.length} Markdown file(s)`, blocks);
+    if (errors.length > 0) {
+      modalBlocks.push({ type: "divider" });
+      modalBlocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: errors.map((e) => `\u26a0\ufe0f ${e.error}`).join("\n"),
+        },
+      });
+    }
+
+    const view = {
+      type: "modal",
+      title: { type: "plain_text", text: "Markdown Rendered" },
+      close: { type: "plain_text", text: "Close" },
+      blocks: modalBlocks,
+    };
+
+    const viewResp = await callSlackApi(userToken, "views.open", {
+      trigger_id: triggerId,
+      view,
+    });
+    const viewData = await viewResp.json();
+    if (!viewData.ok) {
+      console.error("views.open error:", viewData);
+      // Fall back to ephemeral message
+      const fallbackBlocks: unknown[] = [];
+      okResults.forEach((r) => {
+        const renderUrl = `${RENDERER_BASE}/render/${r.id}`;
+        fallbackBlocks.push({
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Rendered:* <${renderUrl}|Open rendered Markdown>`,
+          },
+        });
+      });
+      await respond(payload, "Rendered Markdown file(s)", fallbackBlocks);
+    }
+  }
 }
 
 function handleOAuthInstall(): Response {
