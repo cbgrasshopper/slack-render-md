@@ -92,9 +92,21 @@ async function handleRenderApi(req: Request): Promise<Response> {
 }
 
 async function handleFileAction(payload: Record<string, unknown>): Promise<void> {
-  const file = payload.file as Record<string, unknown> | undefined;
   const user = payload.user as Record<string, unknown> | undefined;
   const channel = payload.channel as Record<string, unknown> | undefined;
+  const message = payload.message as Record<string, unknown> | undefined;
+
+  // Files can be at payload.file (file actions) or payload.message.files (message shortcuts)
+  let file = payload.file as Record<string, unknown> | undefined;
+  if (!file && message) {
+    const files = message.files as Record<string, unknown>[] | undefined;
+    if (files && files.length > 0) {
+      file = files.find((f) =>
+        typeof f.name === "string" &&
+        (f.name.endsWith(".md") || f.name.endsWith(".markdown"))
+      );
+    }
+  }
 
   if (!file) return;
 
