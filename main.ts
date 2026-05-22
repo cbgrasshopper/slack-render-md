@@ -12,6 +12,7 @@ const RENDER_TTL = 60 * 60 * 1000;
 interface RenderEntry {
   filename: string;
   html: string;
+  preview: string;
   created: number;
 }
 
@@ -156,7 +157,7 @@ async function renderOneFile(
   fileName: string,
   fileId: string,
   userToken: string,
-): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; id: string; preview: string } | { ok: false; error: string }> {
   const content = await downloadFileContent(fileId, userToken);
 
   if (!content) {
@@ -166,10 +167,23 @@ async function renderOneFile(
   const html = await renderMarkdown(content, fileName);
   const id = crypto.randomUUID();
 
-  const entry: RenderEntry = { filename: fileName, html, created: Date.now() };
+  // Create preview: first 2000 chars of rendered content, strip HTML
+  const preview = html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#8203;/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .substring(0, 2000);
+
+  const entry: RenderEntry = { filename: fileName, html, preview, created: Date.now() };
   await kv.set(["renders", id], entry, { expireIn: RENDER_TTL });
 
-  return { ok: true, id };
+  return { ok: true, id, preview };
 }
 
 async function getAuthForUser(userId: string): Promise<AuthData | null> {
@@ -267,7 +281,7 @@ async function handleFileAction(
     (msgFiles || []).map((f) => renderOneFile(f.name as string, f.id as string, userToken)),
   );
 
-  const okResults = results.filter((r): r is { ok: true; id: string } => r.ok);
+  const okResults = results.filter((r): r is { ok: true; id: string; preview: string } => r.ok);
   const errors = results.filter((r): r is { ok: false; error: string } => !r.ok);
 
   console.error("okResults:", okResults.length, "errors:", errors.length);
@@ -285,18 +299,26 @@ async function handleFileAction(
 
     okResults.forEach((r) => {
       const renderUrl = `${RENDERER_BASE}/render/${r.id}`;
-      modalBlocks.push(
-        {
+      modalBlocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `*${r.preview.split("\n")[0] || "Rendered"}*\n<${renderUrl}|Open full rendered Markdown>`,
+        },
+      });
+
+      // Show preview content (up to ~2000 chars, truncated to fit Slack limits)
+      const previewText = r.preview.substring(0, 1900);
+      if (previewText.length > 0) {
+        modalBlocks.push({
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `*Rendered:*\n<${renderUrl}|Open rendered Markdown>`,
+            text: previewText.substring(0, 2900),
           },
-        },
-      );
+        });
+      }
 
-      // Add a content preview using the rendered HTML (strip tags for preview)
-      // In the future, we can make the KV entry also store a plaintext preview
       modalBlocks.push({
         type: "context",
         elements: [{
