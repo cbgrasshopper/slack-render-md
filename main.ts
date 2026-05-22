@@ -39,7 +39,8 @@ function callSlackApi(
 
 interface MdFile {
   name: string;
-  id: string;
+  content: string;
+  cdnUrl: string;
 }
 
 async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> {
@@ -48,27 +49,30 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
       (f.name.endsWith(".md") || f.name.endsWith(".markdown"));
   }
 
-  function toMdFile(f: Record<string, unknown>): MdFile {
-    return { name: f.name as string, id: f.id as string };
+  function toMdFile(f: Record<string, unknown>): MdFile | null {
+    const name = f.name as string;
+    const content = (f.preview as string) || (f.content as string);
+    const cdnUrl = (f.url_private as string) || (f.url_private_download as string) || "";
+    if (!content && !cdnUrl) return null;
+    return { name, content: content || "", cdnUrl };
   }
 
   // Check payload.file (file actions)
   if (payload.file) {
     const f = payload.file as Record<string, unknown>;
-    if (isMd(f) && f.id) {
-      return [toMdFile(f)];
-    }
+    const md = isMd(f) ? toMdFile(f) : null;
+    if (md) return [md];
   }
 
   // Check payload.message.files (some payloads include files)
   const message = payload.message as Record<string, unknown> | undefined;
   if (message?.files) {
     const files = message.files as Record<string, unknown>[];
-    const found = files.filter(isMd).filter((f) => f.id);
-    if (found.length > 0) return found.map(toMdFile);
+    const result = files.filter(isMd).map(toMdFile).filter(Boolean) as MdFile[];
+    if (result.length > 0) return result;
   }
 
-  // Fetch message via API to get file IDs
+  // Fetch message via API to get file data
   const channelId = ((payload.channel as Record<string, unknown>)?.id as string) ||
     (payload.channel_id as string) || "";
   const messageTs = (payload.message_ts as string) || (message?.ts as string) || "";
@@ -88,35 +92,27 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
     return [];
   }
 
+  // Check for inline snippet content
+  const msgContent = data.messages[0].content as string | undefined;
+  if (msgContent) {
+    console.error("Found inline snippet content, length:", msgContent.length);
+  }
+
   const msgFiles = data.messages[0].files as Record<string, unknown>[] | undefined;
   if (!msgFiles) return [];
 
-  return msgFiles.filter(isMd).filter((f) => f.id).map(toMdFile);
+  return msgFiles.filter(isMd).map(toMdFile).filter(Boolean) as MdFile[];
 }
 
 async function renderOneFile(
   file: MdFile,
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  if (!file.id) {
-    return { ok: false, error: `No file ID for "${file.name}".` };
-  }
+  let fileContent = file.content;
 
-  console.error("Fetching file info for:", file.id);
-  const fileInfoResp = await callSlackApi("files.info", { file: file.id });
-  const fileInfo = await fileInfoResp.json();
-  console.error("files.info response (first 500):", JSON.stringify(fileInfo).substring(0, 500));
-
-  if (!fileInfo.ok) {
-    return { ok: false, error: `Slack API error: ${fileInfo.error}` };
-  }
-
-  let fileContent = fileInfo.file?.preview as string | undefined;
-  const isTruncated = fileInfo.file?.preview_is_truncated;
-
-  // If preview is truncated (960 char limit), try downloading via CDN
-  if (isTruncated && fileInfo.file?.url_private) {
-    console.error("Preview truncated, trying CDN download with token param");
-    const cdnResp = await fetch(`${fileInfo.file.url_private}?token=${SLACK_BOT_TOKEN}`);
+  // If no preview content from conversations.history, try CDN with token query param
+  if (!fileContent && file.cdnUrl) {
+    console.error("No preview, trying CDN download with ?token= param");
+    const cdnResp = await fetch(`${file.cdnUrl}?token=${SLACK_BOT_TOKEN}`);
     if (cdnResp.ok) {
       const text = await cdnResp.text();
       if (!text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
@@ -126,7 +122,7 @@ async function renderOneFile(
   }
 
   if (!fileContent) {
-    return { ok: false, error: `File "${file.name}" has no text preview.` };
+    return { ok: false, error: `Could not get content for "${file.name}".` };
   }
 
   const html = await renderMarkdown(fileContent, file.name);
