@@ -246,51 +246,21 @@ async function handleFileAction(
 
   const blocks: unknown[] = [];
 
-  if (okResults.length === 1) {
-    const idx = okResults[0];
-    const file = mdFiles[results.indexOf(idx)];
-    const renderUrl = RENDERER_BASE
-      ? `${RENDERER_BASE}/render/${idx.id}`
-      : `/render/${idx.id}`;
+  const renderLinks = okResults.map((r) => {
+    const file = mdFiles[results.indexOf(r)];
+    const renderUrl = `${RENDERER_BASE}/render/${r.id}`;
+    return `<${renderUrl}|Open "${file.name}">`;
+  }).join("\n");
 
-    blocks.push({
-      type: "section",
-      text: { type: "mrkdwn", text: `*Rendered:* ${file.name}` },
-    });
-    blocks.push({
-      type: "actions",
-      elements: [{
-        type: "button",
-        text: { type: "plain_text", text: "Open rendered Markdown" },
-        url: renderUrl,
-        action_id: "open_rendered",
-      }],
-    });
-  } else {
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*Rendered ${okResults.length} Markdown files:*`,
-      },
-    });
-
-    const elements: unknown[] = [];
-    okResults.forEach((r, i) => {
-      const file = mdFiles[results.indexOf(r)];
-      const renderUrl = RENDERER_BASE
-        ? `${RENDERER_BASE}/render/${r.id}`
-        : `/render/${r.id}`;
-
-      elements.push({
-        type: "button",
-        text: { type: "plain_text", text: `${file.name}` },
-        url: renderUrl,
-        action_id: `open_${i}`,
-      });
-    });
-    blocks.push({ type: "actions", elements });
-  }
+  blocks.push({
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: okResults.length === 1
+        ? `*Rendered:* ${renderLinks}`
+        : `*Rendered ${okResults.length} Markdown files:*\n${renderLinks}`,
+    },
+  });
 
   if (errors.length > 0) {
     blocks.push({
