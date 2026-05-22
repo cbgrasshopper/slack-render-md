@@ -167,8 +167,14 @@ async function renderOneFile(
   const html = await renderMarkdown(content, fileName);
   const id = crypto.randomUUID();
 
-  // Create preview: first 2000 chars of rendered content, strip HTML
+  // Create preview: extract text with line breaks preserved
   const preview = html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<\/h[1-6]>/gi, "\n\n")
+    .replace(/<\/li>/gi, "\n")
+    .replace(/<\/tr>/gi, "\n")
+    .replace(/<\/blockquote>/gi, "\n\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
@@ -176,7 +182,7 @@ async function renderOneFile(
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&#8203;/g, "")
-    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\n{4,}/g, "\n\n\n")
     .trim()
     .substring(0, 2000);
 
@@ -307,15 +313,19 @@ async function handleFileAction(
         },
       });
 
-      // Show preview content as plain_text to avoid mrkdwn formatting issues
-      const previewText = r.preview.substring(0, 2900);
+      // Show preview content with mrkdwn formatting (escape special chars)
+      let previewText = r.preview.substring(0, 2900);
       if (previewText.length > 0) {
+        // Escape special mrkdwn characters
+        previewText = previewText
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
         modalBlocks.push({
           type: "section",
           text: {
-            type: "plain_text",
+            type: "mrkdwn",
             text: previewText,
-            emoji: false,
           },
         });
       }
