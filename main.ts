@@ -424,7 +424,7 @@ async function handleViewRender(id: string): Promise<Response> {
   }
 
   const { filename, html } = result.value;
-  const page = HTML_TEMPLATE.replace("{{TITLE}}", filename).replace(
+  const page = HTML_TEMPLATE.replaceAll("{{TITLE}}", filename).replace(
     "{{CONTENT}}",
     html,
   );
