@@ -107,18 +107,28 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
 async function renderOneFile(
   file: MdFile,
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  let fileContent = file.content;
+  let fileContent = "";
 
-  // If no preview content from conversations.history, try CDN with token query param
-  if (!fileContent && file.cdnUrl) {
-    console.error("No preview, trying CDN download with ?token= param");
+  // Try CDN with token query param first (full content)
+  if (file.cdnUrl) {
+    console.error("Trying CDN download with ?token= param");
     const cdnResp = await fetch(`${file.cdnUrl}?token=${SLACK_BOT_TOKEN}`);
     if (cdnResp.ok) {
       const text = await cdnResp.text();
       if (!text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
         fileContent = text;
+        console.error("CDN download succeeded, length:", fileContent.length);
+      } else {
+        console.error("CDN returned HTML, falling back to preview");
       }
+    } else {
+      console.error("CDN download failed:", cdnResp.status);
     }
+  }
+
+  // Fall back to preview from conversations.history (max 960 chars)
+  if (!fileContent) {
+    fileContent = file.content;
   }
 
   if (!fileContent) {
