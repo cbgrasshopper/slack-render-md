@@ -15,11 +15,19 @@ interface RenderEntry {
   created: number;
 }
 
+interface AuthData {
+  botToken: string;
+  userToken: string;
+  userId: string;
+  teamId: string;
+}
+
 const HTML_TEMPLATE = await Deno.readTextFile(
   new URL("./templates/render.html", import.meta.url),
 );
 
 function callSlackApi(
+  token: string,
   method: string,
   data: Record<string, unknown>,
 ): Promise<Response> {
@@ -30,7 +38,7 @@ function callSlackApi(
   return fetch(`https://slack.com/api/${method}`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body,
@@ -39,8 +47,6 @@ function callSlackApi(
 
 interface MdFile {
   name: string;
-  content: string;
-  cdnUrl: string;
 }
 
 async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> {
@@ -49,39 +55,15 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
       (f.name.endsWith(".md") || f.name.endsWith(".markdown"));
   }
 
-  function toMdFile(f: Record<string, unknown>): MdFile | null {
-    const name = f.name as string;
-    const preview = f.preview as string | undefined;
-    const previewHighlight = f.preview_highlight as string | undefined;
-    const content = preview || previewHighlight || "";
-    const cdnUrl = (f.url_private as string) || (f.url_private_download as string) || "";
-    if (!content && !cdnUrl) return null;
-    return { name, content, cdnUrl };
-  }
-
-  // Check payload.file (file actions)
-  if (payload.file) {
-    const f = payload.file as Record<string, unknown>;
-    const md = isMd(f) ? toMdFile(f) : null;
-    if (md) return [md];
-  }
-
-  // Check payload.message.files (some payloads include files)
   const message = payload.message as Record<string, unknown> | undefined;
-  if (message?.files) {
-    const files = message.files as Record<string, unknown>[];
-    const result = files.filter(isMd).map(toMdFile).filter(Boolean) as MdFile[];
-    if (result.length > 0) return result;
-  }
 
-  // Fetch message via API to get file data
   const channelId = ((payload.channel as Record<string, unknown>)?.id as string) ||
     (payload.channel_id as string) || "";
   const messageTs = (payload.message_ts as string) || (message?.ts as string) || "";
 
   if (!channelId || !messageTs) return [];
 
-  const resp = await callSlackApi("conversations.history", {
+  const resp = await callSlackApi(SLACK_BOT_TOKEN, "conversations.history", {
     channel: channelId,
     latest: messageTs,
     limit: 1,
@@ -94,66 +76,105 @@ async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> 
     return [];
   }
 
-  // Check for inline snippet content
-  const msgContent = data.messages[0].content as string | undefined;
-  if (msgContent) {
-    console.error("Found inline snippet content, length:", msgContent.length);
-  }
-
   const msgFiles = data.messages[0].files as Record<string, unknown>[] | undefined;
   if (!msgFiles) return [];
 
-  // Log full file data to see available fields
-  for (const f of msgFiles) {
-    if (isMd(f)) {
-      console.error("File data keys:", Object.keys(f).join(", "));
-      console.error("File mimetype:", f.mimetype, "filetype:", f.filetype);
-      if (f.preview) console.error("Preview length:", (f.preview as string).length);
-      if (f.preview_highlight) console.error("Preview highlight length:", (f.preview_highlight as string).length);
+  const mdFiles = msgFiles.filter(isMd);
+  console.error("Found md files:", mdFiles.length);
+  for (const f of mdFiles) {
+    console.error("File:", JSON.stringify({
+      id: f.id,
+      name: f.name,
+      mimetype: f.mimetype,
+      filetype: f.filetype,
+      hasPreview: !!f.preview,
+      previewLen: (f.preview as string)?.length,
+      hasUrlPrivate: !!f.url_private,
+      urlPrivate: (f.url_private as string)?.substring(0, 80),
+      hasUrlDownload: !!f.url_private_download,
+      urlDownload: (f.url_private_download as string)?.substring(0, 80),
+      urlPrivateFull: f.url_private,
+      urlDownloadFull: f.url_private_download,
+    }));
+  }
+
+  return mdFiles.map((f) => ({ name: f.name as string }));
+}
+
+async function downloadFileContent(
+  fileId: string,
+  userToken: string,
+): Promise<string | null> {
+  // Try user token first with files.info
+  const infoResp = await callSlackApi(userToken, "files.info", { file: fileId });
+  const info = await infoResp.json();
+  if (info.ok) {
+    const preview = info.file?.preview as string | undefined;
+    const isTruncated = info.file?.preview_is_truncated;
+    const urlPrivate = info.file?.url_private as string | undefined;
+    const urlDownload = info.file?.url_private_download as string | undefined;
+    console.error("files.info with user token: ok, preview len:", preview?.length, "truncated:", isTruncated);
+
+    // Try CDN download with user token if preview is truncated
+    if (isTruncated && (urlPrivate || urlDownload)) {
+      const url = urlDownload || urlPrivate;
+      console.error("Preview truncated, downloading via CDN with user token:", url?.substring(0, 80));
+      const cdnResp = await fetch(`${url}?token=${userToken}`);
+      if (cdnResp.ok) {
+        const text = await cdnResp.text();
+        if (!text.startsWith("<!DOCTYPE") && !text.startsWith("<html") && text.length > (preview?.length || 0)) {
+          console.error("CDN download with user token succeeded, len:", text.length);
+          return text;
+        }
+        console.error("CDN returned HTML or short content, len:", text.length);
+      }
+    }
+
+    if (preview) return preview;
+  }
+  console.error("files.info with user token failed:", info.error);
+
+  // Fall back: try CDN download with user token using url_private
+  if (info.ok) {
+    const url = info.file?.url_private_download || info.file?.url_private;
+    if (url) {
+      console.error("Trying CDN fallback with user token");
+      const cdnResp = await fetch(`${url}?token=${userToken}`);
+      if (cdnResp.ok) {
+        const text = await cdnResp.text();
+        if (!text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
+          return text;
+        }
+      }
     }
   }
 
-  return msgFiles.filter(isMd).map(toMdFile).filter(Boolean) as MdFile[];
+  return null;
 }
 
 async function renderOneFile(
-  file: MdFile,
+  fileName: string,
+  fileId: string,
+  userToken: string,
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  let fileContent = "";
+  const content = await downloadFileContent(fileId, userToken);
 
-  // Try CDN with token query param first (full content)
-  if (file.cdnUrl) {
-    console.error("Trying CDN download with ?token= param");
-    const cdnResp = await fetch(`${file.cdnUrl}?token=${SLACK_BOT_TOKEN}`);
-    if (cdnResp.ok) {
-      const text = await cdnResp.text();
-      if (!text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
-        fileContent = text;
-        console.error("CDN download succeeded, length:", fileContent.length);
-      } else {
-        console.error("CDN returned HTML, falling back to preview");
-      }
-    } else {
-      console.error("CDN download failed:", cdnResp.status);
-    }
+  if (!content) {
+    return { ok: false, error: `Could not get content for "${fileName}".` };
   }
 
-  // Fall back to preview from conversations.history (max 960 chars)
-  if (!fileContent) {
-    fileContent = file.content;
-  }
-
-  if (!fileContent) {
-    return { ok: false, error: `Could not get content for "${file.name}".` };
-  }
-
-  const html = await renderMarkdown(fileContent, file.name);
+  const html = await renderMarkdown(content, fileName);
   const id = crypto.randomUUID();
 
-  const entry: RenderEntry = { filename: file.name, html, created: Date.now() };
+  const entry: RenderEntry = { filename: fileName, html, created: Date.now() };
   await kv.set(["renders", id], entry, { expireIn: RENDER_TTL });
 
   return { ok: true, id };
+}
+
+async function getAuthForUser(userId: string): Promise<AuthData | null> {
+  const result = await kv.get<AuthData>(["auth", userId]);
+  return result.value;
 }
 
 async function respond(
@@ -163,7 +184,6 @@ async function respond(
 ): Promise<void> {
   const responseUrl = payload.response_url as string | undefined;
   if (responseUrl) {
-    console.error("Using response_url:", responseUrl);
     const resp = await fetch(responseUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -172,8 +192,6 @@ async function respond(
     if (!resp.ok) {
       const body = await resp.text();
       console.error("response_url error:", resp.status, body);
-    } else {
-      console.error("response_url success:", resp.status);
     }
     return;
   }
@@ -183,8 +201,7 @@ async function respond(
   const userId = (user?.id as string) || "";
   const channelId = (channel?.id as string) || "";
 
-  console.error("Using chat.postEphemeral fallback");
-  const resp = await callSlackApi("chat.postEphemeral", {
+  const resp = await callSlackApi(SLACK_BOT_TOKEN, "chat.postEphemeral", {
     channel: channelId,
     user: userId,
     text,
@@ -193,8 +210,6 @@ async function respond(
   const data = await resp.json();
   if (!data.ok) {
     console.error("chat.postEphemeral error:", data);
-  } else {
-    console.error("chat.postEphemeral success");
   }
 }
 
@@ -202,8 +217,6 @@ async function handleFileAction(
   payload: Record<string, unknown>,
 ): Promise<void> {
   console.error("=== handleFileAction called ===");
-  console.error("Payload keys:", Object.keys(payload).join(", "));
-  console.error("callback_id:", payload.callback_id);
 
   const user = payload.user as Record<string, unknown> | undefined;
   const channel = payload.channel as Record<string, unknown> | undefined;
@@ -217,8 +230,19 @@ async function handleFileAction(
     return;
   }
 
-  const mdFiles = await findMdFiles(payload);
+  // Look up auth data for this user
+  const auth = await getAuthForUser(userId);
+  const userToken = auth?.userToken || "";
+  if (!userToken) {
+    await respond(
+      payload,
+      "Please install the app first via <https://slack-render-md.aliveonline.deno.net/slack/install|this link>.",
+      [],
+    );
+    return;
+  }
 
+  const mdFiles = await findMdFiles(payload);
   console.error("Found .md files:", mdFiles.length);
 
   if (mdFiles.length === 0) {
@@ -226,7 +250,22 @@ async function handleFileAction(
     return;
   }
 
-  const results = await Promise.all(mdFiles.map(renderOneFile));
+  // Get file IDs from the message
+  const message = payload.message as Record<string, unknown> | undefined;
+  const messageTs = (payload.message_ts as string) || (message?.ts as string) || "";
+
+  const historyResp = await callSlackApi(SLACK_BOT_TOKEN, "conversations.history", {
+    channel: channelId,
+    latest: messageTs,
+    limit: 1,
+    inclusive: true,
+  });
+  const historyData = await historyResp.json();
+  const msgFiles = historyData.ok ? (historyData.messages?.[0]?.files as Record<string, unknown>[] | undefined) : undefined;
+
+  const results = await Promise.all(
+    (msgFiles || []).map((f) => renderOneFile(f.name as string, f.id as string, userToken)),
+  );
 
   const okResults = results.filter((r): r is { ok: true; id: string } => r.ok);
   const errors = results.filter((r): r is { ok: false; error: string } => !r.ok);
@@ -242,9 +281,8 @@ async function handleFileAction(
   const blocks: unknown[] = [];
 
   const renderLinks = okResults.map((r) => {
-    const file = mdFiles[results.indexOf(r)];
     const renderUrl = `${RENDERER_BASE}/render/${r.id}`;
-    return `<${renderUrl}|Open "${file.name}">`;
+    return `<${renderUrl}|Open rendered file>`;
   }).join("\n");
 
   blocks.push({
@@ -252,7 +290,7 @@ async function handleFileAction(
     text: {
       type: "mrkdwn",
       text: okResults.length === 1
-        ? `*Rendered:* ${renderLinks}`
+        ? `*Rendered:*\n${renderLinks}`
         : `*Rendered ${okResults.length} Markdown files:*\n${renderLinks}`,
     },
   });
@@ -277,8 +315,7 @@ function handleOAuthInstall(): Response {
     });
   }
 
-  const scopes = [
-    "files:read",
+  const botScopes = [
     "chat:write",
     "channels:history",
     "groups:history",
@@ -286,8 +323,13 @@ function handleOAuthInstall(): Response {
     "mpim:history",
   ].join(",");
 
+  const userScopes = ["files:read"].join(",");
+
   const url =
-    `https://slack.com/oauth/v2/authorize?client_id=${SLACK_CLIENT_ID}&scope=${scopes}&user_scope=`;
+    `https://slack.com/oauth/v2/authorize` +
+    `?client_id=${SLACK_CLIENT_ID}` +
+    `&scope=${botScopes}` +
+    `&user_scope=${userScopes}`;
 
   return Response.redirect(url, 302);
 }
@@ -310,11 +352,29 @@ async function handleOAuthCallback(url: URL): Promise<Response> {
 
   const data = await resp.json();
   if (!data.ok) {
-    return new Response(`OAuth failed: ${data.error}`, { status: 500 });
+    return new Response(`OAuth failed: ${data.error}`, { status: 500, headers: { "Content-Type": "text/plain" } });
+  }
+
+  // Store auth data
+  const auth: AuthData = {
+    botToken: data.access_token as string,
+    userToken: (data.authed_user?.access_token as string) || "",
+    userId: (data.authed_user?.id as string) || "",
+    teamId: data.team?.id as string || "",
+  };
+
+  if (auth.userId && auth.userToken) {
+    await kv.set(["auth", auth.userId], auth);
+  }
+
+  // Update env-level bot token if we got one
+  if (auth.botToken && !SLACK_BOT_TOKEN) {
+    // Note: this only works for the current process; env var is not persisted
+    // In production, the user should set SLACK_BOT_TOKEN from the dashboard
   }
 
   return new Response(
-    "\u2705 slack-render-md installed successfully! You can close this window.",
+    "\u2705 slack-render-md installed successfully! You can close this window and try the shortcut again.",
     { headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
@@ -337,8 +397,6 @@ async function handleSlackRequest(req: Request): Promise<Response> {
   if (
     req.headers.get("content-type")?.includes("application/x-www-form-urlencoded")
   ) {
-    console.error("Form-encoded request body:", rawBody.substring(0, 200));
-
     const params = new URLSearchParams(rawBody);
     const payloadStr = params.get("payload");
     if (!payloadStr) {
@@ -352,8 +410,6 @@ async function handleSlackRequest(req: Request): Promise<Response> {
       return new Response("OK", { status: 200 });
     }
 
-    console.error("Payload type:", payload.type, "callback:", payload.callback_id);
-
     if (payload.callback_id === "render_md_file") {
       handleFileAction(payload).catch((err) =>
         console.error("handleFileAction error:", err)
@@ -364,7 +420,6 @@ async function handleSlackRequest(req: Request): Promise<Response> {
 
   try {
     const payload = JSON.parse(rawBody);
-
     if (payload.type === "url_verification") {
       return new Response(payload.challenge, {
         headers: { "Content-Type": "text/plain" },
@@ -407,6 +462,7 @@ function handleHome(): Response {
     <li>\u2705 Syntax highlighting</li>
   </ul>
   <hr style="margin:2rem 0"/>
+  <p><a href="/slack/install">Install App</a></p>
   <small>slack-render-md &middot; Deno Deploy</small>
 </body></html>`;
 
@@ -416,13 +472,12 @@ function handleHome(): Response {
 }
 
 async function handleDebug(): Promise<Response> {
-  let tokenScopes = "unknown";
+  let tokenInfo = "unknown";
   if (SLACK_BOT_TOKEN) {
     const resp = await fetch("https://slack.com/api/auth.test", {
       headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` },
     });
-    const data = await resp.json();
-    tokenScopes = JSON.stringify(data);
+    tokenInfo = JSON.stringify(await resp.json());
   }
 
   const info = {
@@ -434,7 +489,7 @@ async function handleDebug(): Promise<Response> {
       hasClientSecret: !!SLACK_CLIENT_SECRET,
       rendererBase: RENDERER_BASE,
     },
-    authTest: tokenScopes,
+    authTest: tokenInfo,
   };
 
   return Response.json(info);
@@ -445,7 +500,7 @@ Deno.serve(async (req) => {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
   if (path === "/debug") {
-    return handleDebug();
+    return await handleDebug();
   }
 
   if (path.startsWith("/slack/events")) {
@@ -453,7 +508,7 @@ Deno.serve(async (req) => {
   }
 
   if (path === "/slack/install") {
-    return handleOAuthInstall();
+    return await handleOAuthInstall();
   }
 
   if (path === "/slack/oauth_redirect") {
