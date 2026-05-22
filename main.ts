@@ -91,50 +91,36 @@ async function handleRenderApi(req: Request): Promise<Response> {
   return Response.json({ id });
 }
 
-async function handleFileAction(payload: Record<string, unknown>): Promise<void> {
-  const user = payload.user as Record<string, unknown> | undefined;
-  const channel = payload.channel as Record<string, unknown> | undefined;
+interface MdFile {
+  name: string;
+  id: string;
+}
+
+function findMdFiles(payload: Record<string, unknown>): MdFile[] {
   const message = payload.message as Record<string, unknown> | undefined;
+  const rawFiles = payload.file
+    ? [payload.file as Record<string, unknown>]
+    : (message?.files as Record<string, unknown>[] | undefined) || [];
 
-  // Files can be at payload.file (file actions) or payload.message.files (message shortcuts)
-  let file = payload.file as Record<string, unknown> | undefined;
-  if (!file && message) {
-    const files = message.files as Record<string, unknown>[] | undefined;
-    if (files && files.length > 0) {
-      file = files.find((f) =>
-        typeof f.name === "string" &&
-        (f.name.endsWith(".md") || f.name.endsWith(".markdown"))
-      );
-    }
-  }
+  return rawFiles
+    .filter((f) =>
+      typeof f.name === "string" &&
+      (f.name.endsWith(".md") || f.name.endsWith(".markdown"))
+    )
+    .map((f) => ({ name: f.name as string, id: f.id as string }));
+}
 
-  if (!file) return;
-
-  const fileName = (file.name as string) || "document.md";
-  const fileId = file.id as string;
-  const userId = (user?.id as string) || "";
-  const channelId = (channel?.id as string) || "";
-
-  const fileInfoResp = await callSlackApi("files.info", { file: fileId });
+async function renderOneFile(file: MdFile): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+  const fileInfoResp = await callSlackApi("files.info", { file: file.id });
   const fileInfo = await fileInfoResp.json();
 
   if (!fileInfo.ok) {
-    await callSlackApi("chat.postEphemeral", {
-      channel: channelId,
-      user: userId,
-      text: `Could not get file info for "${fileName}".`,
-    });
-    return;
+    return { ok: false, error: `Could not get info for "${file.name}".` };
   }
 
   const downloadUrl = fileInfo.file?.url_private_download || fileInfo.file?.url_private;
   if (!downloadUrl) {
-    await callSlackApi("chat.postEphemeral", {
-      channel: channelId,
-      user: userId,
-      text: `Could not get download URL for "${fileName}".`,
-    });
-    return;
+    return { ok: false, error: `Could not get download URL for "${file.name}".` };
   }
 
   const fileContentResp = await fetch(downloadUrl, {
@@ -142,46 +128,115 @@ async function handleFileAction(payload: Record<string, unknown>): Promise<void>
   });
 
   if (!fileContentResp.ok) {
+    return { ok: false, error: `Failed to download "${file.name}".` };
+  }
+
+  const fileContent = await fileContentResp.text();
+  const html = await renderMarkdown(fileContent, file.name);
+  const id = crypto.randomUUID();
+
+  const entry: RenderEntry = { filename: file.name, html, created: Date.now() };
+  await kv.set(["renders", id], entry, { expireIn: RENDER_TTL });
+
+  return { ok: true, id };
+}
+
+async function handleFileAction(payload: Record<string, unknown>): Promise<void> {
+  const user = payload.user as Record<string, unknown> | undefined;
+  const channel = payload.channel as Record<string, unknown> | undefined;
+  const userId = (user?.id as string) || "";
+  const channelId = (channel?.id as string) || "";
+
+  const mdFiles = findMdFiles(payload);
+  if (mdFiles.length === 0) {
+    if (channelId && userId) {
+      await callSlackApi("chat.postEphemeral", {
+        channel: channelId,
+        user: userId,
+        text: "No Markdown files (.md) found in this message.",
+      });
+    }
+    return;
+  }
+
+  const results = await Promise.all(mdFiles.map(renderOneFile));
+
+  const okResults = results.filter((r): r is { ok: true; id: string } => r.ok);
+  const errors = results.filter((r): r is { ok: false; error: string } => !r.ok);
+
+  if (okResults.length === 0 && errors.length > 0) {
+    const text = errors.map((e) => `❌ ${e.error}`).join("\n");
     await callSlackApi("chat.postEphemeral", {
       channel: channelId,
       user: userId,
-      text: `Failed to download "${fileName}".`,
+      text,
     });
     return;
   }
 
-  const fileContent = await fileContentResp.text();
-  const html = await renderMarkdown(fileContent, fileName);
-  const id = crypto.randomUUID();
+  const blocks: unknown[] = [];
 
-  const entry: RenderEntry = { filename: fileName, html, created: Date.now() };
-  await kv.set(["renders", id], entry, { expireIn: RENDER_TTL });
+  if (okResults.length === 1) {
+    const idx = okResults[0];
+    const file = mdFiles[results.indexOf(idx)];
+    const renderUrl = RENDERER_BASE
+      ? `${RENDERER_BASE}/render/${idx.id}`
+      : `/render/${idx.id}`;
 
-  const renderUrl = RENDERER_BASE
-    ? `${RENDERER_BASE}/render/${id}`
-    : `/render/${id}`;
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*Rendered:* ${file.name}` },
+    });
+    blocks.push({
+      type: "actions",
+      elements: [{
+        type: "button",
+        text: { type: "plain_text", text: "Open rendered Markdown" },
+        url: renderUrl,
+        action_id: "open_rendered",
+      }],
+    });
+  } else {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Rendered ${okResults.length} Markdown files:*`,
+      },
+    });
+
+    const elements: unknown[] = [];
+    okResults.forEach((r, i) => {
+      const file = mdFiles[results.indexOf(r)];
+      const renderUrl = RENDERER_BASE
+        ? `${RENDERER_BASE}/render/${r.id}`
+        : `/render/${r.id}`;
+
+      elements.push({
+        type: "button",
+        text: { type: "plain_text", text: `${file.name}` },
+        url: renderUrl,
+        action_id: `open_${i}`,
+      });
+    });
+    blocks.push({ type: "actions", elements });
+  }
+
+  if (errors.length > 0) {
+    blocks.push({
+      type: "context",
+      elements: errors.map((e) => ({
+        type: "mrkdwn",
+        text: `⚠️ ${e.error}`,
+      })),
+    });
+  }
 
   await callSlackApi("chat.postEphemeral", {
     channel: channelId,
     user: userId,
-    text: `Rendered "${fileName}"`,
-    blocks: [
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: `*Rendered:* ${fileName}` },
-      },
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Open rendered Markdown" },
-            url: renderUrl,
-            action_id: "open_rendered",
-          },
-        ],
-      },
-    ],
+    text: `Rendered ${okResults.length} Markdown file(s)`,
+    blocks,
   });
 }
 
