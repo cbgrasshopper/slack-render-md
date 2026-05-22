@@ -105,44 +105,36 @@ async function downloadFileContent(
   fileId: string,
   userToken: string,
 ): Promise<string | null> {
-  // Try user token with files.info
-  const infoResp = await callSlackApi(userToken, "files.info", { file: fileId });
-  const info = await infoResp.json();
-  if (info.ok) {
-    // Log all file fields to find content-bearing ones
-    console.error("files.info file keys:", Object.keys(info.file).join(", "));
+  // Try files.info with include_file_contents
+  for (const params of [{ file: fileId }, { file: fileId, include_file_contents: true }]) {
+    const infoResp = await callSlackApi(userToken, "files.info", params);
+    const info = await infoResp.json();
+    if (info.ok) {
+      const fileSize = info.file?.size as number | undefined;
+      const fileLines = info.file?.lines as number | undefined;
+      console.error("files.info ok, size:", fileSize, "lines:", fileLines, "param:", JSON.stringify(params));
 
-    // Check various content fields
-    const fileContent = info.file?.content as string | undefined;
-    const filePlainText = info.file?.plain_text as string | undefined;
-    const filePreviewHighlight = info.file?.preview_highlight as string | undefined;
-    if (fileContent) {
-      console.error("files.info has 'content' field, len:", fileContent.length);
-      return fileContent;
+      // Check for full content in various fields
+      for (const key of ["content", "plain_text", "preview_highlight", "preview", "text"]) {
+        const val = info.file?.[key];
+        if (val && typeof val === "string" && val.length > 0) {
+          console.error("Found content in:", key, "len:", val.length);
+          if (key === "preview_highlight") {
+            // Strip HTML tags to get plain text
+            const text = val.replace(/<[^>]+>/g, "")
+              .replace(/&amp;/g, "&")
+              .replace(/&lt;/g, "<")
+              .replace(/&gt;/g, ">")
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'");
+            if (text.length > 0) return text;
+          } else {
+            return val;
+          }
+        }
+      }
     }
-    if (filePlainText) {
-      console.error("files.info has 'plain_text' field, len:", filePlainText.length);
-      return filePlainText;
-    }
-    // preview_highlight contains the full content as HTML-highlighted text
-    if (filePreviewHighlight) {
-      console.error("preview_highlight len:", filePreviewHighlight.length);
-      // Strip HTML tags to get plain text content, decode entities
-      const plainText = filePreviewHighlight
-        .replace(/<[^>]+>/g, "")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'");
-      console.error("Extracted text length:", plainText.length);
-      return plainText;
-    }
-
-    const preview = info.file?.preview as string | undefined;
-    if (preview) return preview;
   }
-  console.error("files.info with user token failed:", info.error);
 
   // Fall back: try CDN download with user token using url_private
   if (info.ok) {
