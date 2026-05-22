@@ -151,7 +151,11 @@ async function renderOneFile(
   }
 
   const fileContent = await fileContentResp.text();
+  console.error("File content length:", fileContent.length, "preview:", fileContent.substring(0, 200));
+
   const html = await renderMarkdown(fileContent, file.name);
+  console.error("HTML length:", html.length, "preview:", html.substring(0, 200));
+
   const id = crypto.randomUUID();
 
   const entry: RenderEntry = { filename: file.name, html, created: Date.now() };
@@ -394,9 +398,9 @@ async function handleViewRender(id: string): Promise<Response> {
   }
 
   const { filename, html } = result.value;
-  const page = HTML_TEMPLATE.replaceAll("{{TITLE}}", filename).replace(
+  const page = HTML_TEMPLATE.replaceAll("{{TITLE}}", () => filename).replace(
     "{{CONTENT}}",
-    html,
+    () => html,
   );
 
   return new Response(page, {
