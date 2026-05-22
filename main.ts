@@ -26,17 +26,17 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   return result === 0;
 }
 
-function verifySlackRequest(
+async function verifySlackRequest(
   body: string,
   timestamp: string,
   signature: string,
-): boolean {
+): Promise<boolean> {
   const sigBaseString = `v0:${timestamp}:${body}`;
   const encoder = new TextEncoder();
   const data = encoder.encode(sigBaseString);
 
-  const digest = crypto.subtle.digestSync("SHA-256", data) as Uint8Array;
-  const hashHex = Array.from(digest)
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  const hashHex = Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
   const expected = `v0=${hashHex}`;
@@ -226,7 +226,7 @@ async function handleSlackRequest(req: Request): Promise<Response> {
   const timestamp = req.headers.get("x-slack-request-timestamp") || "";
   const signature = req.headers.get("x-slack-signature") || "";
 
-  if (SLACK_SIGNING_SECRET && !verifySlackRequest(rawBody, timestamp, signature)) {
+  if (SLACK_SIGNING_SECRET && !(await verifySlackRequest(rawBody, timestamp, signature))) {
     return new Response("Unauthorized", { status: 401 });
   }
 
