@@ -403,7 +403,16 @@ function handleHome(): Response {
   });
 }
 
-function handleDebug(): Response {
+async function handleDebug(): Promise<Response> {
+  let tokenScopes = "unknown";
+  if (SLACK_BOT_TOKEN) {
+    const resp = await fetch("https://slack.com/api/auth.test", {
+      headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` },
+    });
+    const data = await resp.json();
+    tokenScopes = JSON.stringify(data);
+  }
+
   const info = {
     status: "ok",
     env: {
@@ -413,6 +422,7 @@ function handleDebug(): Response {
       hasClientSecret: !!SLACK_CLIENT_SECRET,
       rendererBase: RENDERER_BASE,
     },
+    authTest: tokenScopes,
   };
 
   return Response.json(info);
