@@ -151,6 +151,22 @@ async function findMdFiles(
 
   const message = payload.message as SlackPayloadRecord | undefined;
 
+  const payloadFiles = message?.files as SlackFile[] | undefined;
+  if (payloadFiles && payloadFiles.length > 0) {
+    const mdFiles = payloadFiles.filter(isMd);
+    if (mdFiles.length > 0) {
+      console.error(
+        "findMdFiles: found",
+        mdFiles.length,
+        "md files in payload",
+      );
+      return mdFiles.map((f) => ({
+        name: f.name as string,
+        id: f.id as string,
+      }));
+    }
+  }
+
   const channelId = ((payload.channel as SlackPayloadRecord)?.id as string) ||
     (payload.channel_id as string) || "";
   const messageTs = (payload.message_ts as string) || (message?.ts as string) ||
@@ -379,27 +395,48 @@ async function handleFileAction(
     return;
   }
 
+  const triggerId = payload.trigger_id as string | undefined;
+
   let mdFiles: MdFile[];
   try {
     mdFiles = await findMdFiles(payload);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error("handleFileAction: findMdFiles error:", msg);
-    await respond(payload, msg, []);
+    if (triggerId) {
+      const userSlackApi = new SlackApi(userToken);
+      await userSlackApi.openView(triggerId, {
+        type: "modal",
+        title: { type: "plain_text", text: "Error" },
+        close: { type: "plain_text", text: "Close" },
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: msg } }],
+      });
+    }
     return;
   }
 
   if (mdFiles.length === 0) {
     console.error("handleFileAction: no md files found");
-    await respond(
-      payload,
-      "No Markdown files (.md) found in this message.",
-      [],
-    );
+    if (triggerId) {
+      const userSlackApi = new SlackApi(userToken);
+      await userSlackApi.openView(triggerId, {
+        type: "modal",
+        title: { type: "plain_text", text: "No Markdown Files" },
+        close: { type: "plain_text", text: "Close" },
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "No Markdown files (.md) found in this message.",
+            },
+          },
+        ],
+      });
+    }
     return;
   }
 
-  const triggerId = payload.trigger_id as string | undefined;
   if (!triggerId) return;
 
   if (mdFiles.length > 1) {
