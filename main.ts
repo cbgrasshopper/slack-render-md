@@ -81,39 +81,63 @@ async function verifySlackRequest(
   signature: string,
 ): Promise<boolean> {
   if (!SLACK_SIGNING_SECRET) return true;
-  if (!timestamp || !signature) return false;
+  if (!timestamp || !signature) {
+    console.error("verifySlackRequest: missing timestamp or signature");
+    return false;
+  }
 
   const parts = signature.split("=");
-  if (parts[0] !== "v0" || !parts[1]) return false;
+  if (parts[0] !== "v0" || !parts[1]) {
+    console.error("verifySlackRequest: invalid signature format");
+    return false;
+  }
 
   const expectedSig = parts[1];
   const base = `v0:${timestamp}:${body}`;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(SLACK_SIGNING_SECRET),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sigBytes = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(base),
-  );
-  const computedSig = Array.from(new Uint8Array(sigBytes))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 
-  const expected = new TextEncoder().encode(expectedSig);
-  const computed = new TextEncoder().encode(computedSig);
-
-  if (expected.byteLength !== computed.byteLength) return false;
-
+  let computedSig: string;
   try {
-    return await crypto.subtle.timingSafeEqual(expected, computed);
-  } catch {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(SLACK_SIGNING_SECRET),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sigBytes = await crypto.subtle.sign(
+      "HMAC",
+      key,
+      new TextEncoder().encode(base),
+    );
+    computedSig = Array.from(new Uint8Array(sigBytes))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch (e) {
+    console.error("verifySlackRequest: HMAC computation failed", e);
     return false;
   }
+
+  if (expectedSig.length !== computedSig.length) {
+    console.error("verifySlackRequest: signature length mismatch");
+    return false;
+  }
+
+  let mismatch = 0;
+  for (let i = 0; i < expectedSig.length; i++) {
+    mismatch |= expectedSig.charCodeAt(i) ^ computedSig.charCodeAt(i);
+  }
+  if (mismatch) {
+    console.error(
+      "verifySlackRequest: signature mismatch",
+      {
+        expectedPrefix: expectedSig.slice(0, 8),
+        computedPrefix: computedSig.slice(0, 8),
+      },
+    );
+    return false;
+  }
+
+  return true;
 }
 
 async function findMdFiles(
@@ -461,6 +485,15 @@ async function handleSlackRequest(req: Request): Promise<Response> {
 
   const timestamp = req.headers.get("X-Slack-Request-Timestamp") || "";
   const signature = req.headers.get("X-Slack-Signature") || "";
+  console.error(
+    "Verifying Slack request:",
+    {
+      hasSecret: !!SLACK_SIGNING_SECRET,
+      hasTimestamp: !!timestamp,
+      hasSignature: !!signature,
+      contentType: req.headers.get("content-type"),
+    },
+  );
   const verified = await verifySlackRequest(rawBody, timestamp, signature);
   if (!verified) {
     console.error("Slack request verification failed");
