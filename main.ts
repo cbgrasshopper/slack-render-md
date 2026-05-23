@@ -305,10 +305,70 @@ function extractUserAndChannelIds(payload: SlackPayloadRecord) {
   };
 }
 
-function partitionResults(results: RenderResult[]) {
-  const okResults = results.filter((r): r is RenderOk => r.ok);
-  const errors = results.filter((r): r is RenderErr => !r.ok);
-  return { okResults, errors };
+async function showFilePickerModal(
+  triggerId: string,
+  mdFiles: MdFile[],
+  userToken: string,
+): Promise<void> {
+  const options = mdFiles.map((f) => ({
+    text: { type: "plain_text", text: f.name },
+    value: `${f.id}::${f.name}`,
+  }));
+
+  const view = {
+    type: "modal",
+    callback_id: "pick_md_file",
+    title: { type: "plain_text", text: "Select Markdown File" },
+    submit: { type: "plain_text", text: "Render" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `${mdFiles.length} Markdown files found. Choose one to render:`,
+        },
+        accessory: {
+          type: "static_select",
+          placeholder: { type: "plain_text", text: "Select a file..." },
+          options,
+          action_id: "file_select",
+        },
+      },
+    ],
+  };
+
+  const userSlackApi = new SlackApi(userToken);
+  await userSlackApi.openView(triggerId, view);
+}
+
+function buildResultView(
+  result: RenderResult,
+): Record<string, unknown> {
+  const blocks: unknown[] = result.ok
+    ? [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text:
+            `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* rendered successfully!\n${result.preview}`,
+        },
+      },
+    ]
+    : [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: `:x: ${result.error}` },
+      },
+    ];
+
+  return {
+    type: "modal",
+    title: { type: "plain_text", text: "Render Complete" },
+    close: { type: "plain_text", text: "Close" },
+    blocks,
+  };
 }
 
 async function showRenderResultsModal(
@@ -347,7 +407,12 @@ async function showRenderResultsModal(
 
   const view = {
     type: "modal",
-    title: { type: "plain_text", text: "Rendered Files" },
+    title: {
+      type: "plain_text",
+      text: okResults.length === 1 && errors.length === 0
+        ? "Render Complete"
+        : "Rendered Files",
+    },
     close: { type: "plain_text", text: "Close" },
     blocks,
   };
@@ -400,23 +465,22 @@ async function handleFileAction(
     return;
   }
 
-  const results = await Promise.all(
-    mdFiles.map((f) => renderOneFile(f.name, f.id, userToken)),
-  );
+  const triggerId = payload.trigger_id as string | undefined;
+  if (!triggerId) return;
 
-  const { okResults, errors } = partitionResults(results);
-  console.error("okResults:", okResults.length, "errors:", errors.length);
-
-  if (okResults.length === 0 && errors.length > 0) {
-    const text = errors.map((e) => `:x: ${e.error}`).join("\n");
-    await respond(payload, text, []);
+  if (mdFiles.length > 1) {
+    await showFilePickerModal(triggerId, mdFiles, userToken);
     return;
   }
 
-  const triggerId = payload.trigger_id as string | undefined;
-  if (triggerId) {
-    await showRenderResultsModal(payload, okResults, errors, userToken);
+  const result = await renderOneFile(mdFiles[0].name, mdFiles[0].id, userToken);
+
+  if (!result.ok) {
+    await respond(payload, `:x: ${result.error}`, []);
+    return;
   }
+
+  await showRenderResultsModal(payload, [result], [], userToken);
 }
 
 function handleOAuthInstall(): Response {
@@ -449,6 +513,66 @@ async function handleOAuthCallback(url: URL): Promise<Response> {
   }
 }
 
+async function handleViewSubmission(
+  payload: SlackPayloadRecord,
+): Promise<Response> {
+  const view = payload.view as SlackPayloadRecord | undefined;
+  if (!view) return new Response("OK", { status: 200 });
+
+  const callbackId = view.callback_id as string | undefined;
+  if (callbackId !== "pick_md_file") return new Response("OK", { status: 200 });
+
+  const state = view.state as SlackPayloadRecord | undefined;
+  const values = state?.values as SlackPayloadRecord | undefined;
+  if (!values) return new Response("OK", { status: 200 });
+
+  let fileId = "";
+  let fileName = "";
+  for (const blockId of Object.keys(values)) {
+    const block = values[blockId] as SlackPayloadRecord | undefined;
+    const action = block?.file_select as SlackPayloadRecord | undefined;
+    if (action?.value) {
+      const parts = (action.value as string).split("::");
+      fileId = parts[0];
+      fileName = parts[1] || "";
+      break;
+    }
+  }
+
+  if (!fileId || !fileName) return new Response("OK", { status: 200 });
+
+  const user = payload.user as SlackPayloadRecord | undefined;
+  const userId = user?.id as string | undefined;
+  if (!userId) return new Response("OK", { status: 200 });
+
+  const auth = await getAuthForUser(userId);
+  if (!auth) {
+    return Response.json({
+      response_action: "update",
+      view: {
+        type: "modal",
+        title: { type: "plain_text", text: "Error" },
+        close: { type: "plain_text", text: "Close" },
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text:
+                "Please install the app first via <https://slack-render-md.aliveonline.deno.net/slack/install|this link>.",
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  const result = await renderOneFile(fileName, fileId, auth.userToken);
+  const responseView = buildResultView(result);
+
+  return Response.json({ response_action: "update", view: responseView });
+}
+
 async function handleSlackRequest(req: Request): Promise<Response> {
   if (req.method === "GET") {
     const url = new URL(req.url);
@@ -466,15 +590,6 @@ async function handleSlackRequest(req: Request): Promise<Response> {
 
   const timestamp = req.headers.get("X-Slack-Request-Timestamp") || "";
   const signature = req.headers.get("X-Slack-Signature") || "";
-  console.error(
-    "Verifying Slack request:",
-    {
-      hasSecret: !!SLACK_SIGNING_SECRET,
-      hasTimestamp: !!timestamp,
-      hasSignature: !!signature,
-      contentType: req.headers.get("content-type"),
-    },
-  );
   const verified = await verifySlackRequest(rawBody, timestamp, signature);
   if (!verified) {
     console.error("Slack request verification failed");
@@ -497,6 +612,10 @@ async function handleSlackRequest(req: Request): Promise<Response> {
       payload = JSON.parse(payloadStr);
     } catch {
       return new Response("OK", { status: 200 });
+    }
+
+    if (payload.type === "view_submission") {
+      return await handleViewSubmission(payload);
     }
 
     if (payload.callback_id === "render_md_file") {
