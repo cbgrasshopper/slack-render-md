@@ -338,9 +338,7 @@ async function showRenderResultsModal(
       text: {
         type: "mrkdwn",
         text:
-          `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* rendered successfully!\n${
-            result.preview.slice(0, 300)
-          }`,
+          `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* rendered successfully!\n${result.preview}`,
       },
     });
     blocks.push({ type: "divider" });
