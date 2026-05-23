@@ -21,7 +21,7 @@ export interface AuthData {
 
 interface RenderEntry {
   filename: string;
-  html: string;
+  markdown: string;
   preview: string;
   created: number;
 }
@@ -151,20 +151,26 @@ async function findMdFiles(
 
   const message = payload.message as SlackPayloadRecord | undefined;
 
-  const payloadFiles = message?.files as SlackFile[] | undefined;
-  if (payloadFiles && payloadFiles.length > 0) {
-    const mdFiles = payloadFiles.filter(isMd);
-    if (mdFiles.length > 0) {
-      console.error(
-        "findMdFiles: found",
-        mdFiles.length,
-        "md files in payload",
-      );
-      return mdFiles.map((f) => ({
-        name: f.name as string,
-        id: f.id as string,
-      }));
+  if (message) {
+    const payloadFiles = message.files as SlackFile[] | undefined;
+    if (!payloadFiles || payloadFiles.length === 0) {
+      console.error("findMdFiles: no files in payload message");
+      return [];
     }
+    const mdFiles = payloadFiles.filter(isMd);
+    if (mdFiles.length === 0) {
+      console.error("findMdFiles: no md files in payload message");
+      return [];
+    }
+    console.error(
+      "findMdFiles: found",
+      mdFiles.length,
+      "md files in payload",
+    );
+    return mdFiles.map((f) => ({
+      name: f.name as string,
+      id: f.id as string,
+    }));
   }
 
   const channelId = ((payload.channel as SlackPayloadRecord)?.id as string) ||
@@ -271,7 +277,7 @@ async function renderOneFile(
 
   const entry: RenderEntry = {
     filename: fileName,
-    html,
+    markdown: content,
     preview,
     created: Date.now(),
   };
@@ -661,7 +667,8 @@ async function handleViewRender(id: string): Promise<Response> {
     return new Response("Render not found or expired", { status: 404 });
   }
 
-  const { filename, html } = result.value;
+  const { filename, markdown } = result.value;
+  const html = await renderMarkdown(markdown);
   const page = HTML_TEMPLATE
     .replaceAll("{{TITLE}}", filename)
     .replace("{{CONTENT}}", html);
