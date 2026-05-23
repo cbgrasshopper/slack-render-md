@@ -21,9 +21,48 @@ export interface AuthData {
 
 interface RenderEntry {
   filename: string;
-  markdown: string;
   preview: string;
   created: number;
+}
+
+const CONTENT_CHUNK_SIZE = 60000;
+
+async function storeRenderContent(
+  id: string,
+  content: string,
+): Promise<void> {
+  if (content.length <= CONTENT_CHUNK_SIZE) {
+    await kv.set(["rc", id], content, { expireIn: RENDER_TTL_MS });
+    return;
+  }
+
+  const chunkCount = Math.ceil(content.length / CONTENT_CHUNK_SIZE);
+  await kv.set(["rc", id], { chunkCount }, { expireIn: RENDER_TTL_MS });
+  for (let i = 0; i < chunkCount; i++) {
+    await kv.set(
+      ["rc", id, i],
+      content.slice(i * CONTENT_CHUNK_SIZE, (i + 1) * CONTENT_CHUNK_SIZE),
+      { expireIn: RENDER_TTL_MS },
+    );
+  }
+}
+
+async function loadRenderContent(
+  id: string,
+): Promise<string | null> {
+  const meta = await kv.get<string | { chunkCount: number }>(["rc", id]);
+  if (!meta.value) return null;
+  if (typeof meta.value === "string") return meta.value;
+  if (typeof meta.value === "object" && "chunkCount" in meta.value) {
+    const parts: string[] = [];
+    for (let i = 0; i < meta.value.chunkCount; i++) {
+      const chunk = await kv.get<string>(["rc", id, i]);
+      if (chunk.value === null) return null;
+      parts.push(chunk.value);
+    }
+    return parts.join("");
+  }
+  return null;
 }
 
 interface SlackFile {
@@ -277,11 +316,11 @@ async function renderOneFile(
 
   const entry: RenderEntry = {
     filename: fileName,
-    markdown: content,
     preview,
     created: Date.now(),
   };
   await kv.set(["renders", id], entry, { expireIn: RENDER_TTL_MS });
+  await storeRenderContent(id, content);
 
   return { ok: true, id, preview, filename: fileName };
 }
@@ -667,7 +706,11 @@ async function handleViewRender(id: string): Promise<Response> {
     return new Response("Render not found or expired", { status: 404 });
   }
 
-  const { filename, markdown } = result.value;
+  const { filename } = result.value;
+  const markdown = await loadRenderContent(id);
+  if (markdown === null) {
+    return new Response("Render content not found", { status: 404 });
+  }
   const html = await renderMarkdown(markdown);
   const page = HTML_TEMPLATE
     .replaceAll("{{TITLE}}", filename)
