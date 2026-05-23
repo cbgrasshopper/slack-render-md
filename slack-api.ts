@@ -81,6 +81,19 @@ export class SlackApi {
     }
   }
 
+  async updateView(
+    viewId: string,
+    view: unknown,
+  ): Promise<void> {
+    const resp = await this.callApi("views.update", {
+      view_id: viewId,
+      view,
+    });
+    if (!resp.ok) {
+      console.error("views.update error:", resp);
+    }
+  }
+
   async getFileInfo(
     fileId: string,
   ): Promise<{ file: Record<string, unknown> | null }> {

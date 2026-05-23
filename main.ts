@@ -413,11 +413,26 @@ async function handleFileAction(
         action_id: "pick_file",
       },
     }));
-    await respond(
-      payload,
-      `${mdFiles.length} Markdown files found. Choose one:`,
-      pickerBlocks,
-    );
+
+    const pickerView = {
+      type: "modal",
+      title: { type: "plain_text", text: "Select Markdown File" },
+      close: { type: "plain_text", text: "Cancel" },
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `${mdFiles.length} Markdown files found. Choose one:`,
+          },
+        },
+        { type: "divider" },
+        ...pickerBlocks,
+      ],
+    };
+
+    const userSlackApi = new SlackApi(userToken);
+    await userSlackApi.openView(triggerId, pickerView);
     return;
   }
 
@@ -478,12 +493,14 @@ async function handleBlockAction(
   const fileName = parts[1] || "";
   if (!fileId || !fileName) return;
 
+  const viewPayload = payload.view as SlackPayloadRecord | undefined;
+  const viewId = viewPayload?.id as string | undefined;
+
   const user = payload.user as SlackPayloadRecord | undefined;
   const userId = user?.id as string | undefined;
   if (!userId) return;
 
   const triggerId = payload.trigger_id as string | undefined;
-  if (!triggerId) return;
 
   const auth = await getAuthForUser(userId);
   if (!auth) return;
@@ -516,7 +533,12 @@ async function handleBlockAction(
   };
 
   const userSlackApi = new SlackApi(auth.userToken);
-  await userSlackApi.openView(triggerId, view);
+
+  if (viewId) {
+    await userSlackApi.updateView(viewId, view);
+  } else if (triggerId) {
+    await userSlackApi.openView(triggerId, view);
+  }
 }
 
 async function handleSlackRequest(req: Request): Promise<Response> {
