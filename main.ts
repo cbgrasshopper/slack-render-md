@@ -27,7 +27,7 @@ interface RenderEntry {
 
 const CONTENT_CHUNK_SIZE = 60000;
 
-async function storeRenderContent(
+export async function storeRenderContent(
   id: string,
   content: string,
 ): Promise<void> {
@@ -47,11 +47,11 @@ async function storeRenderContent(
   }
 }
 
-async function loadRenderContent(
+export async function loadRenderContent(
   id: string,
 ): Promise<string | null> {
   const meta = await kv.get<string | { chunkCount: number }>(["rc", id]);
-  if (!meta.value) return null;
+  if (meta.value == null) return null;
   if (typeof meta.value === "string") return meta.value;
   if (typeof meta.value === "object" && "chunkCount" in meta.value) {
     const parts: string[] = [];
@@ -214,8 +214,7 @@ async function findMdFiles(
 
   const channelId = ((payload.channel as SlackPayloadRecord)?.id as string) ||
     (payload.channel_id as string) || "";
-  const messageTs = (payload.message_ts as string) || (message?.ts as string) ||
-    "";
+  const messageTs = payload.message_ts as string || "";
 
   if (!channelId || !messageTs) {
     console.error("findMdFiles: missing channelId or messageTs");
@@ -264,7 +263,8 @@ async function downloadFileContent(
   }
 
   const info = infoResult.file;
-  const url = info.url_private_download || info.url_private;
+  const url = info.url_private_download as string | undefined ||
+    info.url_private as string | undefined;
 
   if (url) {
     console.error("Downloading file via CDN with Bearer auth");
@@ -289,7 +289,7 @@ async function downloadFileContent(
     );
   }
 
-  const preview = info.preview;
+  const preview = info.preview as string | undefined;
   if (preview) {
     console.error("Using preview, len:", preview.length);
     return preview;

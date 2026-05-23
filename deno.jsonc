@@ -8,7 +8,7 @@
   },
   "tasks": {
     "deploy": "deployctl deploy --project slack-render-md main.ts",
-    "test": "deno fmt --check && deno lint && deno test --allow-net --allow-read --allow-env",
+    "test": "deno fmt --check && deno lint && deno test --allow-net --allow-read --allow-env --allow-write --unstable-kv",
     "start": "deno run --allow-net --allow-read --allow-env --unstable-kv main.ts"
   },
   "imports": {
