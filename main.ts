@@ -155,44 +155,59 @@ async function findMdFiles(
   const messageTs = (payload.message_ts as string) || (message?.ts as string) ||
     "";
 
-  if (!channelId || !messageTs) return [];
+  console.error(
+    "findMdFiles:",
+    JSON.stringify({
+      channelId,
+      messageTs,
+      hasMessage: !!message,
+      hasFiles: !!message?.files,
+      type: payload.type,
+    }),
+  );
+
+  if (!channelId || !messageTs) {
+    console.error("findMdFiles: missing channelId or messageTs");
+    return [];
+  }
 
   const historyResult = await slackApi.getConversationHistory(
     channelId,
     messageTs,
   );
   if (!historyResult.messages) {
-    console.error("conversations.history failed");
+    console.error("findMdFiles: conversations.history failed");
     return [];
   }
 
-  const msgFiles = historyResult.messages[0].files as
+  const msg = historyResult.messages[0];
+  console.error(
+    "findMdFiles: message keys:",
+    Object.keys(msg).join(", "),
+  );
+
+  const msgFiles = msg.files as
     | SlackFile[]
     | undefined;
-  if (!msgFiles) return [];
+  if (!msgFiles) {
+    console.error("findMdFiles: no files in message");
+    return [];
+  }
 
-  const mdFiles = msgFiles.filter(isMd);
-  console.error("Found md files:", mdFiles.length);
-  for (const f of mdFiles) {
-    console.error(
-      "File:",
-      JSON.stringify({
+  console.error(
+    "findMdFiles: raw files:",
+    JSON.stringify(
+      msgFiles.map((f) => ({
         id: f.id,
         name: f.name,
         mimetype: f.mimetype,
         filetype: f.filetype,
-        hasPreview: !!f.preview,
-        previewLen: (f.preview as string | undefined)?.length,
-        hasUrlPrivate: !!f.url_private,
-        urlPrivate: (f.url_private as string | undefined)?.substring(0, 80),
-        hasUrlDownload: !!f.url_private_download,
-        urlDownload: (f.url_private_download as string | undefined)?.substring(
-          0,
-          80,
-        ),
-      }),
-    );
-  }
+      })),
+    ),
+  );
+
+  const mdFiles = msgFiles.filter(isMd);
+  console.error("findMdFiles: md files found:", mdFiles.length);
 
   return mdFiles.map((f) => ({ name: f.name as string }));
 }
@@ -394,6 +409,12 @@ async function handleFileAction(
   console.error("Found .md files:", mdFiles.length);
 
   if (mdFiles.length === 0) {
+    console.error(
+      "handleFileAction: no md files found, payload keys:",
+      Object.keys(payload).join(", "),
+      "type:",
+      payload.type,
+    );
     await respond(
       payload,
       "No Markdown files (.md) found in this message.",
