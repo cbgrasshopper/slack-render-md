@@ -35,7 +35,9 @@ export class SlackApi {
   async getConversationHistory(
     channelId: string,
     messageTs: string,
-  ): Promise<{ messages: Array<Record<string, unknown>> | null }> {
+  ): Promise<
+    { messages: Array<Record<string, unknown>> | null; error?: string }
+  > {
     const resp = await this.callApi("conversations.history", {
       channel: channelId,
       latest: messageTs,
@@ -44,7 +46,7 @@ export class SlackApi {
     });
     if (!resp.ok || !resp.messages) {
       console.error("conversations.history failed:", resp);
-      return { messages: null };
+      return { messages: null, error: String(resp.error || "unknown") };
     }
     return { messages: resp.messages as Array<Record<string, unknown>> };
   }

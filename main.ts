@@ -50,6 +50,7 @@ interface SlackPayload {
 
 interface MdFile {
   name: string;
+  id: string;
 }
 
 interface RenderOk {
@@ -155,17 +156,6 @@ async function findMdFiles(
   const messageTs = (payload.message_ts as string) || (message?.ts as string) ||
     "";
 
-  console.error(
-    "findMdFiles:",
-    JSON.stringify({
-      channelId,
-      messageTs,
-      hasMessage: !!message,
-      hasFiles: !!message?.files,
-      type: payload.type,
-    }),
-  );
-
   if (!channelId || !messageTs) {
     console.error("findMdFiles: missing channelId or messageTs");
     return [];
@@ -175,41 +165,31 @@ async function findMdFiles(
     channelId,
     messageTs,
   );
+  if (historyResult.error === "not_in_channel") {
+    throw new Error(
+      "The bot has not been added to this channel. Please run `/invite @slack-render-md` in this channel, then try again.",
+    );
+  }
   if (!historyResult.messages) {
-    console.error("findMdFiles: conversations.history failed");
+    console.error(
+      "findMdFiles: conversations.history failed:",
+      historyResult.error,
+    );
     return [];
   }
 
   const msg = historyResult.messages[0];
-  console.error(
-    "findMdFiles: message keys:",
-    Object.keys(msg).join(", "),
-  );
 
-  const msgFiles = msg.files as
-    | SlackFile[]
-    | undefined;
+  const msgFiles = msg.files as SlackFile[] | undefined;
   if (!msgFiles) {
     console.error("findMdFiles: no files in message");
     return [];
   }
 
-  console.error(
-    "findMdFiles: raw files:",
-    JSON.stringify(
-      msgFiles.map((f) => ({
-        id: f.id,
-        name: f.name,
-        mimetype: f.mimetype,
-        filetype: f.filetype,
-      })),
-    ),
-  );
-
   const mdFiles = msgFiles.filter(isMd);
   console.error("findMdFiles: md files found:", mdFiles.length);
 
-  return mdFiles.map((f) => ({ name: f.name as string }));
+  return mdFiles.map((f) => ({ name: f.name as string, id: f.id as string }));
 }
 
 async function downloadFileContent(
@@ -325,11 +305,6 @@ function extractUserAndChannelIds(payload: SlackPayloadRecord) {
   };
 }
 
-function getMessageTimestamp(payload: SlackPayloadRecord): string {
-  const message = payload.message as SlackPayloadRecord | undefined;
-  return (payload.message_ts as string) || (message?.ts as string) || "";
-}
-
 function partitionResults(results: RenderResult[]) {
   const okResults = results.filter((r): r is RenderOk => r.ok);
   const errors = results.filter((r): r is RenderErr => !r.ok);
@@ -405,16 +380,18 @@ async function handleFileAction(
     return;
   }
 
-  const mdFiles = await findMdFiles(payload);
-  console.error("Found .md files:", mdFiles.length);
+  let mdFiles: MdFile[];
+  try {
+    mdFiles = await findMdFiles(payload);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error("handleFileAction: findMdFiles error:", msg);
+    await respond(payload, msg, []);
+    return;
+  }
 
   if (mdFiles.length === 0) {
-    console.error(
-      "handleFileAction: no md files found, payload keys:",
-      Object.keys(payload).join(", "),
-      "type:",
-      payload.type,
-    );
+    console.error("handleFileAction: no md files found");
     await respond(
       payload,
       "No Markdown files (.md) found in this message.",
@@ -423,23 +400,8 @@ async function handleFileAction(
     return;
   }
 
-  const messageTs = getMessageTimestamp(payload);
-  const historyResult = await slackApi.getConversationHistory(
-    channelId,
-    messageTs,
-  );
-  if (!historyResult.messages) {
-    console.error("conversations.history failed");
-    return;
-  }
-
-  const msgFiles = historyResult.messages[0].files as
-    | SlackFile[]
-    | undefined;
-  if (!msgFiles) return;
-
   const results = await Promise.all(
-    msgFiles.map((f) => renderOneFile(f.name, f.id, userToken)),
+    mdFiles.map((f) => renderOneFile(f.name, f.id, userToken)),
   );
 
   const { okResults, errors } = partitionResults(results);
