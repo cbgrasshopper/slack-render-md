@@ -1,13 +1,23 @@
-import { renderMarkdown } from "./renderer.ts";
+import { htmlToSlack, renderMarkdown } from "./renderer.ts";
+import { SlackApi } from "./slack-api.ts";
+import { OAuthHandler } from "./oauth.ts";
 
+const SLACK_SIGNING_SECRET = Deno.env.get("SLACK_SIGNING_SECRET") || "";
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN") || "";
 const SLACK_CLIENT_ID = Deno.env.get("SLACK_CLIENT_ID") || "";
 const SLACK_CLIENT_SECRET = Deno.env.get("SLACK_CLIENT_SECRET") || "";
 const RENDERER_BASE = Deno.env.get("RENDERER_BASE") ||
   "https://slack-render-md.aliveonline.deno.net";
 
-const kv = await Deno.openKv();
-const RENDER_TTL = 60 * 60 * 1000;
+export const kv = await Deno.openKv();
+const RENDER_TTL_MS = 60 * 60 * 1000;
+
+export interface AuthData {
+  botToken: string;
+  userToken: string;
+  userId: string;
+  teamId: string;
+}
 
 interface RenderEntry {
   filename: string;
@@ -16,87 +26,147 @@ interface RenderEntry {
   created: number;
 }
 
-interface AuthData {
-  botToken: string;
-  userToken: string;
-  userId: string;
-  teamId: string;
+interface SlackFile {
+  id: string;
+  name: string;
+  mimetype?: string;
+  filetype?: string;
+  preview?: string;
+  url_private?: string;
+  url_private_download?: string;
 }
 
-const HTML_TEMPLATE = await Deno.readTextFile(
-  new URL("./templates/render.html", import.meta.url),
-);
-
-function callSlackApi(
-  token: string,
-  method: string,
-  data: Record<string, unknown>,
-): Promise<Response> {
-  const body = new URLSearchParams();
-  for (const [key, value] of Object.entries(data)) {
-    body.set(key, typeof value === "object" ? JSON.stringify(value) : String(value));
-  }
-  return fetch(`https://slack.com/api/${method}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
-  });
+interface SlackPayload {
+  type?: string;
+  trigger_id?: string;
+  response_url?: string;
+  callback_id?: string;
+  channel?: { id?: string; name?: string };
+  channel_id?: string;
+  user?: { id?: string; name?: string };
+  message?: { ts?: string; files?: SlackFile[] };
+  message_ts?: string;
 }
 
 interface MdFile {
   name: string;
 }
 
-async function findMdFiles(payload: Record<string, unknown>): Promise<MdFile[]> {
-  function isMd(f: Record<string, unknown>): boolean {
+interface RenderOk {
+  ok: true;
+  id: string;
+  preview: string;
+  filename: string;
+}
+
+interface RenderErr {
+  ok: false;
+  error: string;
+}
+
+type RenderResult = RenderOk | RenderErr;
+
+type SlackPayloadRecord = Record<string, unknown>;
+
+const HTML_TEMPLATE = await Deno.readTextFile(
+  new URL("./templates/render.html", import.meta.url),
+);
+
+const slackApi = new SlackApi(SLACK_BOT_TOKEN);
+const oauthHandler = new OAuthHandler(SLACK_CLIENT_ID, SLACK_CLIENT_SECRET);
+
+async function verifySlackRequest(
+  body: string,
+  timestamp: string,
+  signature: string,
+): Promise<boolean> {
+  if (!SLACK_SIGNING_SECRET || !timestamp || !signature) return false;
+
+  const parts = signature.split("=");
+  if (parts[0] !== "v0" || !parts[1]) return false;
+
+  const expectedSig = parts[1];
+  const base = `v0:${timestamp}:${body}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(SLACK_SIGNING_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sigBytes = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(base),
+  );
+  const computedSig = Array.from(new Uint8Array(sigBytes))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  const expected = new TextEncoder().encode(expectedSig);
+  const computed = new TextEncoder().encode(computedSig);
+
+  if (expected.byteLength !== computed.byteLength) return false;
+
+  try {
+    return await crypto.subtle.timingSafeEqual(expected, computed);
+  } catch {
+    return false;
+  }
+}
+
+async function findMdFiles(
+  payload: SlackPayloadRecord,
+): Promise<MdFile[]> {
+  function isMd(f: SlackFile): boolean {
     return typeof f.name === "string" &&
       (f.name.endsWith(".md") || f.name.endsWith(".markdown"));
   }
 
-  const message = payload.message as Record<string, unknown> | undefined;
+  const message = payload.message as SlackPayloadRecord | undefined;
 
-  const channelId = ((payload.channel as Record<string, unknown>)?.id as string) ||
+  const channelId = ((payload.channel as SlackPayloadRecord)?.id as string) ||
     (payload.channel_id as string) || "";
-  const messageTs = (payload.message_ts as string) || (message?.ts as string) || "";
+  const messageTs = (payload.message_ts as string) || (message?.ts as string) ||
+    "";
 
   if (!channelId || !messageTs) return [];
 
-  const resp = await callSlackApi(SLACK_BOT_TOKEN, "conversations.history", {
-    channel: channelId,
-    latest: messageTs,
-    limit: 1,
-    inclusive: true,
-  });
-  const data = await resp.json();
-
-  if (!data.ok || !data.messages || data.messages.length === 0) {
-    console.error("conversations.history failed:", data);
+  const historyResult = await slackApi.getConversationHistory(
+    channelId,
+    messageTs,
+  );
+  if (!historyResult.messages) {
+    console.error("conversations.history failed");
     return [];
   }
 
-  const msgFiles = data.messages[0].files as Record<string, unknown>[] | undefined;
+  const msgFiles = historyResult.messages[0].files as
+    | SlackFile[]
+    | undefined;
   if (!msgFiles) return [];
 
   const mdFiles = msgFiles.filter(isMd);
   console.error("Found md files:", mdFiles.length);
   for (const f of mdFiles) {
-    console.error("File:", JSON.stringify({
-      id: f.id,
-      name: f.name,
-      mimetype: f.mimetype,
-      filetype: f.filetype,
-      hasPreview: !!f.preview,
-      previewLen: (f.preview as string)?.length,
-      hasUrlPrivate: !!f.url_private,
-      urlPrivate: (f.url_private as string)?.substring(0, 80),
-      hasUrlDownload: !!f.url_private_download,
-      urlDownload: (f.url_private_download as string)?.substring(0, 80),
-      urlPrivateFull: f.url_private,
-      urlDownloadFull: f.url_private_download,
-    }));
+    console.error(
+      "File:",
+      JSON.stringify({
+        id: f.id,
+        name: f.name,
+        mimetype: f.mimetype,
+        filetype: f.filetype,
+        hasPreview: !!f.preview,
+        previewLen: (f.preview as string | undefined)?.length,
+        hasUrlPrivate: !!f.url_private,
+        urlPrivate: (f.url_private as string | undefined)?.substring(0, 80),
+        hasUrlDownload: !!f.url_private_download,
+        urlDownload: (f.url_private_download as string | undefined)?.substring(
+          0,
+          80,
+        ),
+      }),
+    );
   }
 
   return mdFiles.map((f) => ({ name: f.name as string }));
@@ -106,48 +176,42 @@ async function downloadFileContent(
   fileId: string,
   userToken: string,
 ): Promise<string | null> {
-  // Try files.info to get the download URL
-  const infoResp = await callSlackApi(userToken, "files.info", { file: fileId });
-  const info = await infoResp.json();
-  if (info.ok) {
-    const url = info.file?.url_private_download || info.file?.url_private;
-
-    if (url) {
-      console.error("Downloading file via CDN with Bearer auth");
-      const cdnResp = await fetch(url, {
-        headers: { Authorization: `Bearer ${userToken}` },
-      });
-      if (cdnResp.ok) {
-        const text = await cdnResp.text();
-        if (text.length > 0 && !text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
-          console.error("CDN download succeeded, content length:", text.length);
-          return text;
-        }
-      }
-      console.error("CDN download failed:", cdnResp.status, cdnResp.headers.get("content-type"));
-    }
-
-    // Fall back to preview
-    const preview = info.file?.preview as string | undefined;
-    if (preview) {
-      console.error("Using preview, len:", preview.length);
-      return preview;
-    }
+  const fileApi = new SlackApi(userToken);
+  const infoResult = await fileApi.getFileInfo(fileId);
+  if (!infoResult.file) {
+    return null;
   }
 
-  // Fall back: try CDN download with user token using url_private
-  if (info.ok) {
-    const url = info.file?.url_private_download || info.file?.url_private;
-    if (url) {
-      console.error("Trying CDN fallback with user token");
-      const cdnResp = await fetch(`${url}?token=${userToken}`);
-      if (cdnResp.ok) {
-        const text = await cdnResp.text();
-        if (!text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
-          return text;
-        }
+  const info = infoResult.file;
+  const url = info.url_private_download || info.url_private;
+
+  if (url) {
+    console.error("Downloading file via CDN with Bearer auth");
+    const cdnResp = await fetch(url, {
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    if (cdnResp.ok) {
+      const text = await cdnResp.text();
+      if (
+        text.length > 0 &&
+        !text.startsWith("<!DOCTYPE") &&
+        !text.startsWith("<html")
+      ) {
+        console.error("CDN download succeeded, content length:", text.length);
+        return text;
       }
     }
+    console.error(
+      "CDN download failed:",
+      cdnResp.status,
+      cdnResp.headers.get("content-type"),
+    );
+  }
+
+  const preview = info.preview;
+  if (preview) {
+    console.error("Using preview, len:", preview.length);
+    return preview;
   }
 
   return null;
@@ -157,85 +221,27 @@ async function renderOneFile(
   fileName: string,
   fileId: string,
   userToken: string,
-): Promise<{ ok: true; id: string; preview: string } | { ok: false; error: string }> {
+): Promise<RenderResult> {
   const content = await downloadFileContent(fileId, userToken);
 
   if (!content) {
     return { ok: false, error: `Could not get content for "${fileName}".` };
   }
 
-  const html = await renderMarkdown(content, fileName);
+  const html = await renderMarkdown(content);
   const id = crypto.randomUUID();
-
-  // Convert HTML to Slack mrkdwn
-  function htmlToSlack(html: string): string {
-    let s = html;
-
-    // 1. Inline formatting (do before block-level to preserve structure)
-    s = s
-      .replace(/<(?:strong|b)>/gi, "*")
-      .replace(/<\/(?:strong|b)>/gi, "*")
-      .replace(/<(?:em|i)>/gi, "_")
-      .replace(/<\/(?:em|i)>/gi, "_")
-      .replace(/<(?:del|s|strike)>/gi, "~")
-      .replace(/<\/(?:del|s|strike)>/gi, "~")
-      .replace(/<code>/gi, "`")
-      .replace(/<\/code>/gi, "`")
-      .replace(/<blockquote>/gi, ">");
-
-    // 2. Links: extract text from <a> tags
-    s = s.replace(/<a\s[^>]*>([\s\S]*?)<\/a>/gi, "$1");
-
-    // 3. Headings: wrap in bold on their own line
-    s = s
-      .replace(/<h[1-6][^>]*>/gi, "\n*")
-      .replace(/<\/h[1-6]>/gi, "*\n");
-
-    // 4. Block-level elements → newlines
-    s = s
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<p>/gi, "")
-      .replace(/<\/p>/gi, "\n\n")
-      // (headings handled in step 3 above)
-      .replace(/<li>/gi, "  \n")
-      .replace(/<\/li>/gi, "")
-      .replace(/<\/ol>/gi, "\n")
-      .replace(/<\/ul>/gi, "\n")
-      .replace(/<\/tr>/gi, "\n")
-      .replace(/<\/blockquote>/gi, "\n\n")
-      .replace(/<\/div>/gi, "\n")
-      .replace(/<\/dt>/gi, "\n")
-      .replace(/<\/dd>/gi, "\n")
-      .replace(/<hr\s*\/?>/gi, "\n---\n");
-
-    // 5. Remove remaining tags
-    s = s.replace(/<[^>]+>/g, "");
-
-    // 6. Decode HTML entities
-    s = s
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&#8203;/g, "")
-      .replace(/&#8217;/g, "'");
-
-    // 7. Collapse excessive whitespace
-    s = s
-      .replace(/\n{4,}/g, "\n\n\n")
-      .replace(/[ \t]+\n/g, "\n")
-      .replace(/\n[ \t]+/g, "\n");
-
-    return s.trim().substring(0, 2000);
-  }
 
   const preview = htmlToSlack(html);
 
-  const entry: RenderEntry = { filename: fileName, html, preview, created: Date.now() };
-  await kv.set(["renders", id], entry, { expireIn: RENDER_TTL });
+  const entry: RenderEntry = {
+    filename: fileName,
+    html,
+    preview,
+    created: Date.now(),
+  };
+  await kv.set(["renders", id], entry, { expireIn: RENDER_TTL_MS });
 
-  return { ok: true, id, preview };
+  return { ok: true, id, preview, filename: fileName };
 }
 
 async function getAuthForUser(userId: string): Promise<AuthData | null> {
@@ -244,7 +250,7 @@ async function getAuthForUser(userId: string): Promise<AuthData | null> {
 }
 
 async function respond(
-  payload: Record<string, unknown>,
+  payload: SlackPayloadRecord,
   text: string,
   blocks: unknown[],
 ): Promise<void> {
@@ -262,33 +268,87 @@ async function respond(
     return;
   }
 
-  const user = payload.user as Record<string, unknown> | undefined;
-  const channel = payload.channel as Record<string, unknown> | undefined;
+  const user = payload.user as SlackPayloadRecord | undefined;
+  const channel = payload.channel as SlackPayloadRecord | undefined;
   const userId = (user?.id as string) || "";
   const channelId = (channel?.id as string) || "";
 
-  const resp = await callSlackApi(SLACK_BOT_TOKEN, "chat.postEphemeral", {
-    channel: channelId,
-    user: userId,
-    text,
-    blocks,
-  });
-  const data = await resp.json();
-  if (!data.ok) {
-    console.error("chat.postEphemeral error:", data);
+  await slackApi.postEphemeral(channelId, userId, text, blocks);
+}
+
+function extractUserAndChannelIds(payload: SlackPayloadRecord) {
+  const user = payload.user as SlackPayloadRecord | undefined;
+  const channel = payload.channel as SlackPayloadRecord | undefined;
+  return {
+    userId: (user?.id as string) || "",
+    channelId: (channel?.id as string) || "",
+  };
+}
+
+function getMessageTimestamp(payload: SlackPayloadRecord): string {
+  const message = payload.message as SlackPayloadRecord | undefined;
+  return (payload.message_ts as string) || (message?.ts as string) || "";
+}
+
+function partitionResults(results: RenderResult[]) {
+  const okResults = results.filter((r): r is RenderOk => r.ok);
+  const errors = results.filter((r): r is RenderErr => !r.ok);
+  return { okResults, errors };
+}
+
+async function showRenderResultsModal(
+  payload: SlackPayloadRecord,
+  okResults: RenderOk[],
+  errors: RenderErr[],
+  userToken: string,
+): Promise<void> {
+  const triggerId = payload.trigger_id as string | undefined;
+  if (!triggerId) return;
+
+  const blocks: unknown[] = [];
+
+  for (const result of okResults) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* rendered successfully!\n${
+            result.preview.slice(0, 300)
+          }`,
+      },
+    });
+    blocks.push({ type: "divider" });
   }
+
+  for (const err of errors) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `:x: ${err.error}`,
+      },
+    });
+    blocks.push({ type: "divider" });
+  }
+
+  const view = {
+    type: "modal",
+    title: { type: "plain_text", text: "Rendered Files" },
+    close: { type: "plain_text", text: "Close" },
+    blocks,
+  };
+
+  const userSlackApi = new SlackApi(userToken);
+  await userSlackApi.openView(triggerId, view);
 }
 
 async function handleFileAction(
-  payload: Record<string, unknown>,
+  payload: SlackPayloadRecord,
 ): Promise<void> {
   console.error("=== handleFileAction called ===");
 
-  const user = payload.user as Record<string, unknown> | undefined;
-  const channel = payload.channel as Record<string, unknown> | undefined;
-  const userId = (user?.id as string) || "";
-  const channelId = (channel?.id as string) || "";
-
+  const { userId, channelId } = extractUserAndChannelIds(payload);
   console.error("user:", userId, "channel:", channelId);
 
   if (!channelId || !userId) {
@@ -296,7 +356,6 @@ async function handleFileAction(
     return;
   }
 
-  // Look up auth data for this user
   const auth = await getAuthForUser(userId);
   const userToken = auth?.userToken || "";
   if (!userToken) {
@@ -312,191 +371,76 @@ async function handleFileAction(
   console.error("Found .md files:", mdFiles.length);
 
   if (mdFiles.length === 0) {
-    await respond(payload, "No Markdown files (.md) found in this message.", []);
+    await respond(
+      payload,
+      "No Markdown files (.md) found in this message.",
+      [],
+    );
     return;
   }
 
-  // Get file IDs from the message
-  const message = payload.message as Record<string, unknown> | undefined;
-  const messageTs = (payload.message_ts as string) || (message?.ts as string) || "";
+  const messageTs = getMessageTimestamp(payload);
+  const historyResult = await slackApi.getConversationHistory(
+    channelId,
+    messageTs,
+  );
+  if (!historyResult.messages) {
+    console.error("conversations.history failed");
+    return;
+  }
 
-  const historyResp = await callSlackApi(SLACK_BOT_TOKEN, "conversations.history", {
-    channel: channelId,
-    latest: messageTs,
-    limit: 1,
-    inclusive: true,
-  });
-  const historyData = await historyResp.json();
-  const msgFiles = historyData.ok ? (historyData.messages?.[0]?.files as Record<string, unknown>[] | undefined) : undefined;
+  const msgFiles = historyResult.messages[0].files as
+    | SlackFile[]
+    | undefined;
+  if (!msgFiles) return;
 
   const results = await Promise.all(
-    (msgFiles || []).map((f) => renderOneFile(f.name as string, f.id as string, userToken)),
+    msgFiles.map((f) => renderOneFile(f.name, f.id, userToken)),
   );
 
-  const okResults = results.filter((r): r is { ok: true; id: string; preview: string } => r.ok);
-  const errors = results.filter((r): r is { ok: false; error: string } => !r.ok);
-
+  const { okResults, errors } = partitionResults(results);
   console.error("okResults:", okResults.length, "errors:", errors.length);
 
   if (okResults.length === 0 && errors.length > 0) {
-    const text = errors.map((e) => `\u274c ${e.error}`).join("\n");
+    const text = errors.map((e) => `:x: ${e.error}`).join("\n");
     await respond(payload, text, []);
     return;
   }
 
-  // Open a modal with the rendered content
   const triggerId = payload.trigger_id as string | undefined;
   if (triggerId) {
-    const modalBlocks: unknown[] = [];
-
-    okResults.forEach((r) => {
-      const renderUrl = `${RENDERER_BASE}/render/${r.id}`;
-      modalBlocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*${r.preview.split("\n")[0] || "Rendered"}*\n<${renderUrl}|Open full rendered Markdown>`,
-        },
-      });
-
-      // Show preview content with mrkdwn formatting (escape special chars)
-      let previewText = r.preview.substring(0, 2900);
-      if (previewText.length > 0) {
-        // Escape special mrkdwn characters
-        previewText = previewText
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;");
-        modalBlocks.push({
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: previewText,
-          },
-        });
-      }
-
-      modalBlocks.push({
-        type: "context",
-        elements: [{
-          type: "mrkdwn",
-          text: "_Full rendering includes: GFM tables, Mermaid diagrams, KaTeX math, syntax highlighting_",
-        }],
-      });
-    });
-
-    if (errors.length > 0) {
-      modalBlocks.push({ type: "divider" });
-      modalBlocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: errors.map((e) => `\u26a0\ufe0f ${e.error}`).join("\n"),
-        },
-      });
-    }
-
-    const view = {
-      type: "modal",
-      title: { type: "plain_text", text: "Markdown Rendered" },
-      close: { type: "plain_text", text: "Close" },
-      blocks: modalBlocks,
-    };
-
-    const viewResp = await callSlackApi(userToken, "views.open", {
-      trigger_id: triggerId,
-      view,
-    });
-    const viewData = await viewResp.json();
-    if (!viewData.ok) {
-      console.error("views.open error:", viewData);
-      // Fall back to ephemeral message
-      const fallbackBlocks: unknown[] = [];
-      okResults.forEach((r) => {
-        const renderUrl = `${RENDERER_BASE}/render/${r.id}`;
-        fallbackBlocks.push({
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `*Rendered:* <${renderUrl}|Open rendered Markdown>`,
-          },
-        });
-      });
-      await respond(payload, "Rendered Markdown file(s)", fallbackBlocks);
-    }
+    await showRenderResultsModal(payload, okResults, errors, userToken);
   }
 }
 
 function handleOAuthInstall(): Response {
-  if (!SLACK_CLIENT_ID) {
+  try {
+    const url = oauthHandler.getInstallUrl();
+    return Response.redirect(url, 302);
+  } catch {
     return new Response("App not configured for OAuth install", {
       status: 501,
     });
   }
-
-  const botScopes = [
-    "chat:write",
-    "channels:history",
-    "groups:history",
-    "im:history",
-    "mpim:history",
-  ].join(",");
-
-  const userScopes = ["files:read"].join(",");
-
-  const url =
-    `https://slack.com/oauth/v2/authorize` +
-    `?client_id=${SLACK_CLIENT_ID}` +
-    `&redirect_uri=${encodeURIComponent("https://slack-render-md.aliveonline.deno.net/slack/oauth_redirect")}` +
-    `&scope=${botScopes}` +
-    `&user_scope=${userScopes}`;
-
-  return Response.redirect(url, 302);
 }
 
 async function handleOAuthCallback(url: URL): Promise<Response> {
-  const code = url.searchParams.get("code");
-  if (!code) {
-    return new Response("Missing code parameter", { status: 400 });
+  try {
+    await oauthHandler.handleCallback(
+      url.searchParams.get("code") || "",
+    );
+
+    return new Response(
+      "\u2705 slack-render-md installed successfully! You can close this window and try the shortcut again.",
+      { headers: { "Content-Type": "text/html; charset=utf-8" } },
+    );
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return new Response(`OAuth failed: ${msg}`, {
+      status: 500,
+      headers: { "Content-Type": "text/plain" },
+    });
   }
-
-  const resp = await fetch("https://slack.com/api/oauth.v2.access", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: SLACK_CLIENT_ID,
-      client_secret: SLACK_CLIENT_SECRET,
-      code,
-    }),
-  });
-
-  const data = await resp.json();
-  if (!data.ok) {
-    return new Response(`OAuth failed: ${data.error}`, { status: 500, headers: { "Content-Type": "text/plain" } });
-  }
-
-  // Store auth data
-  const auth: AuthData = {
-    botToken: data.access_token as string,
-    userToken: (data.authed_user?.access_token as string) || "",
-    userId: (data.authed_user?.id as string) || "",
-    teamId: data.team?.id as string || "",
-  };
-
-  if (auth.userId && auth.userToken) {
-    await kv.set(["auth", auth.userId], auth);
-  }
-
-  // Update env-level bot token if we got one
-  if (auth.botToken && !SLACK_BOT_TOKEN) {
-    // Note: this only works for the current process; env var is not persisted
-    // In production, the user should set SLACK_BOT_TOKEN from the dashboard
-  }
-
-  return new Response(
-    "\u2705 slack-render-md installed successfully! You can close this window and try the shortcut again.",
-    { headers: { "Content-Type": "text/html; charset=utf-8" } },
-  );
 }
 
 async function handleSlackRequest(req: Request): Promise<Response> {
@@ -514,8 +458,18 @@ async function handleSlackRequest(req: Request): Promise<Response> {
     return new Response("OK", { status: 200 });
   }
 
+  const timestamp = req.headers.get("X-Slack-Request-Timestamp") || "";
+  const signature = req.headers.get("X-Slack-Signature") || "";
+  const verified = await verifySlackRequest(rawBody, timestamp, signature);
+  if (!verified) {
+    console.error("Slack request verification failed");
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   if (
-    req.headers.get("content-type")?.includes("application/x-www-form-urlencoded")
+    req.headers.get("content-type")?.includes(
+      "application/x-www-form-urlencoded",
+    )
   ) {
     const params = new URLSearchParams(rawBody);
     const payloadStr = params.get("payload");
@@ -523,7 +477,7 @@ async function handleSlackRequest(req: Request): Promise<Response> {
       return new Response("OK", { status: 200 });
     }
 
-    let payload: Record<string, unknown>;
+    let payload: SlackPayloadRecord;
     try {
       payload = JSON.parse(payloadStr);
     } catch {
@@ -553,6 +507,12 @@ async function handleSlackRequest(req: Request): Promise<Response> {
 }
 
 async function handleViewRender(id: string): Promise<Response> {
+  const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!UUID_RE.test(id)) {
+    return new Response("Invalid render ID", { status: 400 });
+  }
+
   const result = await kv.get<RenderEntry>(["renders", id]);
 
   if (!result.value) {
@@ -560,10 +520,9 @@ async function handleViewRender(id: string): Promise<Response> {
   }
 
   const { filename, html } = result.value;
-  const page = HTML_TEMPLATE.replaceAll("{{TITLE}}", () => filename).replace(
-    "{{CONTENT}}",
-    () => html,
-  );
+  const page = HTML_TEMPLATE
+    .replaceAll("{{TITLE}}", filename)
+    .replace("{{CONTENT}}", html);
 
   return new Response(page, {
     headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -603,8 +562,11 @@ async function handleDebug(): Promise<Response> {
   const info = {
     status: "ok",
     env: {
+      hasSigningSecret: !!SLACK_SIGNING_SECRET,
       hasBotToken: !!SLACK_BOT_TOKEN,
-      botTokenPrefix: SLACK_BOT_TOKEN ? SLACK_BOT_TOKEN.substring(0, 10) + "..." : "",
+      botTokenPrefix: SLACK_BOT_TOKEN
+        ? SLACK_BOT_TOKEN.substring(0, 10) + "..."
+        : "",
       hasClientId: !!SLACK_CLIENT_ID,
       hasClientSecret: !!SLACK_CLIENT_SECRET,
       rendererBase: RENDERER_BASE,
@@ -628,7 +590,7 @@ Deno.serve(async (req) => {
   }
 
   if (path === "/slack/install") {
-    return await handleOAuthInstall();
+    return handleOAuthInstall();
   }
 
   if (path === "/slack/oauth_redirect") {

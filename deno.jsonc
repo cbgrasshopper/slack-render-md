@@ -1,13 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/denoland/deno/main/cli/schemas/config-file.v1.json",
   "fmt": {
-    "include": ["main.ts", "renderer.ts", "renderer_test.ts"]
+    "include": ["main.ts", "renderer.ts", "oauth.ts", "slack-api.ts", "renderer_test.ts"]
   },
   "lint": {
-    "include": ["main.ts", "renderer.ts", "renderer_test.ts"]
+    "include": ["main.ts", "renderer.ts", "oauth.ts", "slack-api.ts", "renderer_test.ts"]
   },
-  "lock": false,
   "tasks": {
+    "deploy": "deployctl deploy --project slack-render-md main.ts",
     "test": "deno fmt --check && deno lint && deno test --allow-net --allow-read --allow-env",
     "start": "deno run --allow-net --allow-read --allow-env --unstable-kv main.ts"
   },
