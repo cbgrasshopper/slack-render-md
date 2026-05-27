@@ -254,9 +254,9 @@ async function findMdFiles(
 
 async function downloadFileContent(
   fileId: string,
-  userToken: string,
+  token: string,
 ): Promise<string | null> {
-  const fileApi = new SlackApi(userToken);
+  const fileApi = new SlackApi(token);
   const infoResult = await fileApi.getFileInfo(fileId);
   if (!infoResult.file) {
     return null;
@@ -269,7 +269,7 @@ async function downloadFileContent(
   if (url) {
     console.error("Downloading file via CDN with Bearer auth");
     const cdnResp = await fetch(url, {
-      headers: { Authorization: `Bearer ${userToken}` },
+      headers: { Authorization: `Bearer ${token}` },
     });
     if (cdnResp.ok) {
       const text = await cdnResp.text();
@@ -301,9 +301,9 @@ async function downloadFileContent(
 async function renderOneFile(
   fileName: string,
   fileId: string,
-  userToken: string,
+  token: string,
 ): Promise<RenderResult> {
-  const content = await downloadFileContent(fileId, userToken);
+  const content = await downloadFileContent(fileId, token);
 
   if (!content) {
     return { ok: false, error: `Could not get content for "${fileName}".` };
@@ -323,11 +323,6 @@ async function renderOneFile(
   await storeRenderContent(id, content);
 
   return { ok: true, id, preview, filename: fileName };
-}
-
-async function getAuthForUser(userId: string): Promise<AuthData | null> {
-  const result = await kv.get<AuthData>(["auth", userId]);
-  return result.value;
 }
 
 async function respond(
@@ -370,7 +365,6 @@ async function showRenderResultsModal(
   payload: SlackPayloadRecord,
   okResults: RenderOk[],
   errors: RenderErr[],
-  userToken: string,
 ): Promise<void> {
   const triggerId = payload.trigger_id as string | undefined;
   if (!triggerId) return;
@@ -412,8 +406,7 @@ async function showRenderResultsModal(
     blocks,
   };
 
-  const userSlackApi = new SlackApi(userToken);
-  await userSlackApi.openView(triggerId, view);
+  await slackApi.openView(triggerId, view);
 }
 
 async function handleFileAction(
@@ -429,17 +422,6 @@ async function handleFileAction(
     return;
   }
 
-  const auth = await getAuthForUser(userId);
-  const userToken = auth?.userToken || "";
-  if (!userToken) {
-    await respond(
-      payload,
-      "Please install the app first via <https://slack-render-md.aliveonline.deno.net/slack/install|this link>.",
-      [],
-    );
-    return;
-  }
-
   const triggerId = payload.trigger_id as string | undefined;
 
   let mdFiles: MdFile[];
@@ -449,8 +431,7 @@ async function handleFileAction(
     const msg = error instanceof Error ? error.message : String(error);
     console.error("handleFileAction: findMdFiles error:", msg);
     if (triggerId) {
-      const userSlackApi = new SlackApi(userToken);
-      await userSlackApi.openView(triggerId, {
+      await slackApi.openView(triggerId, {
         type: "modal",
         title: { type: "plain_text", text: "Error" },
         close: { type: "plain_text", text: "Close" },
@@ -463,8 +444,7 @@ async function handleFileAction(
   if (mdFiles.length === 0) {
     console.error("handleFileAction: no md files found");
     if (triggerId) {
-      const userSlackApi = new SlackApi(userToken);
-      await userSlackApi.openView(triggerId, {
+      await slackApi.openView(triggerId, {
         type: "modal",
         title: { type: "plain_text", text: "No Markdown Files" },
         close: { type: "plain_text", text: "Close" },
@@ -513,19 +493,22 @@ async function handleFileAction(
       ],
     };
 
-    const userSlackApi = new SlackApi(userToken);
-    await userSlackApi.openView(triggerId, pickerView);
+    await slackApi.openView(triggerId, pickerView);
     return;
   }
 
-  const result = await renderOneFile(mdFiles[0].name, mdFiles[0].id, userToken);
+  const result = await renderOneFile(
+    mdFiles[0].name,
+    mdFiles[0].id,
+    SLACK_BOT_TOKEN,
+  );
 
   if (!result.ok) {
     await respond(payload, `:x: ${result.error}`, []);
     return;
   }
 
-  await showRenderResultsModal(payload, [result], [], userToken);
+  await showRenderResultsModal(payload, [result], []);
 }
 
 function handleOAuthInstall(): Response {
@@ -578,16 +561,9 @@ async function handleBlockAction(
   const viewPayload = payload.view as SlackPayloadRecord | undefined;
   const viewId = viewPayload?.id as string | undefined;
 
-  const user = payload.user as SlackPayloadRecord | undefined;
-  const userId = user?.id as string | undefined;
-  if (!userId) return;
-
   const triggerId = payload.trigger_id as string | undefined;
 
-  const auth = await getAuthForUser(userId);
-  if (!auth) return;
-
-  const result = await renderOneFile(fileName, fileId, auth.userToken);
+  const result = await renderOneFile(fileName, fileId, SLACK_BOT_TOKEN);
 
   const blocks: unknown[] = result.ok
     ? [
@@ -614,12 +590,10 @@ async function handleBlockAction(
     blocks,
   };
 
-  const userSlackApi = new SlackApi(auth.userToken);
-
   if (viewId) {
-    await userSlackApi.updateView(viewId, view);
+    await slackApi.updateView(viewId, view);
   } else if (triggerId) {
-    await userSlackApi.openView(triggerId, view);
+    await slackApi.openView(triggerId, view);
   }
 }
 

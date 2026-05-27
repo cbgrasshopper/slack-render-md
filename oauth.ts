@@ -24,9 +24,10 @@ export class OAuthHandler {
       "groups:history",
       "im:history",
       "mpim:history",
+      "files:read",
     ].join(",");
 
-    this.userScopes = ["files:read"].join(",");
+    this.userScopes = [].join(",");
   }
 
   getInstallUrl(): string {
