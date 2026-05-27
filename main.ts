@@ -356,15 +356,26 @@ function extractUserAndChannelIds(payload: SlackPayloadRecord) {
   };
 }
 
+const INSTALL_LINK = `${RENDERER_BASE}/slack/install`;
+
 async function showRenderResultsModal(
   payload: SlackPayloadRecord,
   okResults: RenderOk[],
   errors: RenderErr[],
+  warning?: string,
 ): Promise<void> {
   const triggerId = payload.trigger_id as string | undefined;
   if (!triggerId) return;
 
   const blocks: unknown[] = [];
+
+  if (warning) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: warning },
+    });
+    blocks.push({ type: "divider" });
+  }
 
   for (const result of okResults) {
     blocks.push({
@@ -512,7 +523,11 @@ async function handleFileAction(
     return;
   }
 
-  await showRenderResultsModal(payload, [result], []);
+  const warning = tokens.length === 1
+    ? `Some files may show truncated content. <${INSTALL_LINK}|Install the app> for full rendering in all channels.`
+    : undefined;
+
+  await showRenderResultsModal(payload, [result], [], warning);
 }
 
 function handleOAuthInstall(): Response {
@@ -577,29 +592,41 @@ async function handleBlockAction(
 
   const result = await renderOneFile(fileName, fileId, tokens);
 
-  const blocks: unknown[] = result.ok
-    ? [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text:
-            `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* rendered successfully!\n${result.preview}`,
-        },
+  const resultBlocks: unknown[] = [];
+
+  if (result.ok && tokens.length === 1) {
+    resultBlocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `Some files may show truncated content. <${INSTALL_LINK}|Install the app> for full rendering in all channels.`,
       },
-    ]
-    : [
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: `:x: ${result.error}` },
+    });
+    resultBlocks.push({ type: "divider" });
+  }
+
+  if (result.ok) {
+    resultBlocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* rendered successfully!\n${result.preview}`,
       },
-    ];
+    });
+  } else {
+    resultBlocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `:x: ${result.error}` },
+    });
+  }
 
   const view = {
     type: "modal",
     title: { type: "plain_text", text: "Render Complete" },
     close: { type: "plain_text", text: "Close" },
-    blocks,
+    blocks: resultBlocks,
   };
 
   if (viewId) {
