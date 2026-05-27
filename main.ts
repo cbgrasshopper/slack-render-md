@@ -271,32 +271,37 @@ async function findMdFiles(
   });
 }
 
-async function downloadFileContent(
+export async function downloadFileContent(
   urlPrivate: string,
   preview: string,
-  token: string,
+  tokens: string[],
 ): Promise<string | null> {
   if (urlPrivate) {
-    console.error("Downloading file via CDN with Bearer auth");
-    const cdnResp = await fetch(urlPrivate, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (cdnResp.ok) {
-      const text = await cdnResp.text();
-      if (
-        text.length > 0 &&
-        !text.startsWith("<!DOCTYPE") &&
-        !text.startsWith("<html")
-      ) {
-        console.error("CDN download succeeded, content length:", text.length);
-        return text;
+    for (const token of tokens) {
+      console.error("Downloading file via CDN with Bearer auth");
+      const cdnResp = await fetch(urlPrivate, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (cdnResp.ok) {
+        const text = await cdnResp.text();
+        if (
+          text.length > 0 &&
+          !text.startsWith("<!DOCTYPE") &&
+          !text.startsWith("<html")
+        ) {
+          console.error(
+            "CDN download succeeded, content length:",
+            text.length,
+          );
+          return text;
+        }
       }
+      console.error(
+        "CDN download failed:",
+        cdnResp.status,
+        cdnResp.headers.get("content-type"),
+      );
     }
-    console.error(
-      "CDN download failed:",
-      cdnResp.status,
-      cdnResp.headers.get("content-type"),
-    );
   }
 
   if (preview) {
@@ -310,11 +315,11 @@ async function downloadFileContent(
 async function renderOneFile(
   fileName: string,
   fileId: string,
-  token: string,
+  tokens: string[],
 ): Promise<RenderResult> {
   const cached = fileCache.get(fileId);
   const content = cached
-    ? await downloadFileContent(cached.urlPrivate, cached.preview, token)
+    ? await downloadFileContent(cached.urlPrivate, cached.preview, tokens)
     : null;
 
   if (!content) {
@@ -335,6 +340,11 @@ async function renderOneFile(
   await storeRenderContent(id, content);
 
   return { ok: true, id, preview, filename: fileName };
+}
+
+async function getAuthForUser(userId: string): Promise<AuthData | null> {
+  const result = await kv.get<AuthData>(["auth", userId]);
+  return result.value;
 }
 
 function extractUserAndChannelIds(payload: SlackPayloadRecord) {
@@ -409,6 +419,10 @@ async function handleFileAction(
 
   const triggerId = payload.trigger_id as string | undefined;
 
+  const auth = await getAuthForUser(userId);
+  const userToken = auth?.userToken || "";
+  const tokens = userToken ? [SLACK_BOT_TOKEN, userToken] : [SLACK_BOT_TOKEN];
+
   let mdFiles: MdFile[];
   try {
     mdFiles = await findMdFiles(payload);
@@ -482,11 +496,7 @@ async function handleFileAction(
     return;
   }
 
-  const result = await renderOneFile(
-    mdFiles[0].name,
-    mdFiles[0].id,
-    SLACK_BOT_TOKEN,
-  );
+  const result = await renderOneFile(mdFiles[0].name, mdFiles[0].id, tokens);
 
   if (!result.ok) {
     if (triggerId) {
@@ -557,7 +567,15 @@ async function handleBlockAction(
 
   const triggerId = payload.trigger_id as string | undefined;
 
-  const result = await renderOneFile(fileName, fileId, SLACK_BOT_TOKEN);
+  const user = payload.user as SlackPayloadRecord | undefined;
+  const userId = user?.id as string | undefined;
+  const tokens = [SLACK_BOT_TOKEN];
+  if (userId) {
+    const auth = await getAuthForUser(userId);
+    if (auth?.userToken) tokens.push(auth.userToken);
+  }
+
+  const result = await renderOneFile(fileName, fileId, tokens);
 
   const blocks: unknown[] = result.ok
     ? [

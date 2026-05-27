@@ -3,6 +3,7 @@ import {
   kv,
   storeRenderContent,
   loadRenderContent,
+  downloadFileContent,
   type AuthData,
 } from "./main.ts";
 
@@ -77,4 +78,76 @@ Deno.test("AuthData type is exported", () => {
     teamId: "T456",
   };
   assertEquals(auth.userId, "U123");
+});
+
+Deno.test("downloadFileContent - falls back to preview when all tokens fail", async () => {
+  const result = await downloadFileContent("", "preview text", ["token"]);
+  assertEquals(result, "preview text");
+});
+
+Deno.test("downloadFileContent - returns null when no URL or preview", async () => {
+  const result = await downloadFileContent("", "", ["token"]);
+  assertEquals(result, null);
+});
+
+Deno.test("downloadFileContent - tries tokens in order, uses first success", async () => {
+  let callCount = 0;
+  const handler = (req: Request) => {
+    callCount++;
+    const auth = req.headers.get("Authorization");
+    if (auth === "Bearer bad-token") {
+      return new Response("<html>login</html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+    if (auth === "Bearer good-token") {
+      return new Response("# Full Markdown Content", {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+    return new Response("Forbidden", { status: 403 });
+  };
+
+  const server = Deno.serve({ port: 8765, onListen: () => {} }, handler);
+
+  try {
+    const url = "http://localhost:8765/test";
+
+    const result = await downloadFileContent(url, "preview", [
+      "bad-token",
+      "good-token",
+    ]);
+    assertEquals(result, "# Full Markdown Content");
+    assertEquals(callCount, 2);
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("downloadFileContent - stops after first successful token", async () => {
+  let callCount = 0;
+  const handler = (req: Request) => {
+    callCount++;
+    return new Response("# Hello", {
+      status: 200,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  };
+
+  const server = Deno.serve({ port: 8766, onListen: () => {} }, handler);
+
+  try {
+    const url = "http://localhost:8766/test";
+
+    const result = await downloadFileContent(url, "preview", [
+      "good-token",
+      "also-good-token",
+    ]);
+    assertEquals(result, "# Hello");
+    assertEquals(callCount, 1);
+  } finally {
+    await server.shutdown();
+  }
 });
