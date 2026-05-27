@@ -51,23 +51,6 @@ export class SlackApi {
     return { messages: resp.messages as Array<Record<string, unknown>> };
   }
 
-  async postEphemeral(
-    channelId: string,
-    userId: string,
-    text: string,
-    blocks: unknown[],
-  ): Promise<void> {
-    const resp = await this.callApi("chat.postEphemeral", {
-      channel: channelId,
-      user: userId,
-      text,
-      blocks,
-    });
-    if (!resp.ok) {
-      console.error("chat.postEphemeral error:", resp);
-    }
-  }
-
   async openView(
     triggerId: string,
     view: unknown,
@@ -92,18 +75,5 @@ export class SlackApi {
     if (!resp.ok) {
       console.error("views.update error:", resp);
     }
-  }
-
-  async getFileInfo(
-    fileId: string,
-  ): Promise<{ file: Record<string, unknown> | null }> {
-    const resp = await this.callApi("files.info", {
-      file: fileId,
-    });
-    if (!resp.ok) {
-      console.error("files.info failed:", resp);
-      return { file: null };
-    }
-    return { file: resp.file as Record<string, unknown> | null };
   }
 }

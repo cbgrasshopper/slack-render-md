@@ -90,7 +90,11 @@ interface SlackPayload {
 interface MdFile {
   name: string;
   id: string;
+  urlPrivate: string;
+  preview: string;
 }
+
+const fileCache = new Map<string, { urlPrivate: string; preview: string }>();
 
 interface RenderOk {
   ok: true;
@@ -206,10 +210,19 @@ async function findMdFiles(
       mdFiles.length,
       "md files in payload",
     );
-    return mdFiles.map((f) => ({
-      name: f.name as string,
-      id: f.id as string,
-    }));
+    const result = mdFiles.map((f) => {
+      const urlPrivate = (f.url_private_download as string) ||
+        (f.url_private as string) || "";
+      const preview = (f.preview as string) || "";
+      fileCache.set(f.id as string, { urlPrivate, preview });
+      return {
+        name: f.name as string,
+        id: f.id as string,
+        urlPrivate,
+        preview,
+      };
+    });
+    return result;
   }
 
   const channelId = ((payload.channel as SlackPayloadRecord)?.id as string) ||
@@ -249,26 +262,23 @@ async function findMdFiles(
   const mdFiles = msgFiles.filter(isMd);
   console.error("findMdFiles: md files found:", mdFiles.length);
 
-  return mdFiles.map((f) => ({ name: f.name as string, id: f.id as string }));
+  return mdFiles.map((f) => {
+    const urlPrivate = (f.url_private_download as string) ||
+      (f.url_private as string) || "";
+    const preview = (f.preview as string) || "";
+    fileCache.set(f.id as string, { urlPrivate, preview });
+    return { name: f.name as string, id: f.id as string, urlPrivate, preview };
+  });
 }
 
 async function downloadFileContent(
-  fileId: string,
+  urlPrivate: string,
+  preview: string,
   token: string,
 ): Promise<string | null> {
-  const fileApi = new SlackApi(token);
-  const infoResult = await fileApi.getFileInfo(fileId);
-  if (!infoResult.file) {
-    return null;
-  }
-
-  const info = infoResult.file;
-  const url = info.url_private_download as string | undefined ||
-    info.url_private as string | undefined;
-
-  if (url) {
+  if (urlPrivate) {
     console.error("Downloading file via CDN with Bearer auth");
-    const cdnResp = await fetch(url, {
+    const cdnResp = await fetch(urlPrivate, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (cdnResp.ok) {
@@ -289,7 +299,6 @@ async function downloadFileContent(
     );
   }
 
-  const preview = info.preview as string | undefined;
   if (preview) {
     console.error("Using preview, len:", preview.length);
     return preview;
@@ -303,7 +312,10 @@ async function renderOneFile(
   fileId: string,
   token: string,
 ): Promise<RenderResult> {
-  const content = await downloadFileContent(fileId, token);
+  const cached = fileCache.get(fileId);
+  const content = cached
+    ? await downloadFileContent(cached.urlPrivate, cached.preview, token)
+    : null;
 
   if (!content) {
     return { ok: false, error: `Could not get content for "${fileName}".` };
@@ -323,33 +335,6 @@ async function renderOneFile(
   await storeRenderContent(id, content);
 
   return { ok: true, id, preview, filename: fileName };
-}
-
-async function respond(
-  payload: SlackPayloadRecord,
-  text: string,
-  blocks: unknown[],
-): Promise<void> {
-  const responseUrl = payload.response_url as string | undefined;
-  if (responseUrl) {
-    const resp = await fetch(responseUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, blocks, response_type: "ephemeral" }),
-    });
-    if (!resp.ok) {
-      const body = await resp.text();
-      console.error("response_url error:", resp.status, body);
-    }
-    return;
-  }
-
-  const user = payload.user as SlackPayloadRecord | undefined;
-  const channel = payload.channel as SlackPayloadRecord | undefined;
-  const userId = (user?.id as string) || "";
-  const channelId = (channel?.id as string) || "";
-
-  await slackApi.postEphemeral(channelId, userId, text, blocks);
 }
 
 function extractUserAndChannelIds(payload: SlackPayloadRecord) {
@@ -504,7 +489,16 @@ async function handleFileAction(
   );
 
   if (!result.ok) {
-    await respond(payload, `:x: ${result.error}`, []);
+    if (triggerId) {
+      await slackApi.openView(triggerId, {
+        type: "modal",
+        title: { type: "plain_text", text: "Error" },
+        close: { type: "plain_text", text: "Close" },
+        blocks: [
+          { type: "section", text: { type: "mrkdwn", text: result.error } },
+        ],
+      });
+    }
     return;
   }
 

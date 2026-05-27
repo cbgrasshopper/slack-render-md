@@ -9,7 +9,7 @@ Slack app that renders Markdown files shared in Slack messages as styled HTML pa
 - **`main.ts`** — single HTTP entry point: Slack interactive components, OAuth install/callback, `/render/:id` serving, landing page, debug endpoint
 - **`renderer.ts`** — Markdown → HTML (`marked`) and HTML → Slack mrkdwn (`htmlToSlack`)
 - **`oauth.ts`** — OAuth v2 flow: install URL generation and token callback handling
-- **`slack-api.ts`** — Slack API client: `callApi`, `conversations.history`, `chat.postEphemeral`, `views.open`, `views.update`, `files.info`
+- **`slack-api.ts`** — Slack API client: `callApi`, `conversations.history`, `views.open`, `views.update`
 - **`templates/render.html`** — HTML template loaded at startup
 - **Deno KV** — stores render metadata (1h TTL) and OAuth tokens; content over 60KB is chunked across multiple KV keys at `["rc", id, i]`
 
@@ -44,11 +44,11 @@ Slack app that renders Markdown files shared in Slack messages as styled HTML pa
 ## Key Behaviors
 
 - **File detection**: `findMdFiles` extracts `.md` files from `payload.message.files` directly (message actions include the full message). Falls back to `conversations.history` only when `payload.message` is absent. This means the bot does NOT need `channels:history`/`im:history` etc. for the primary flow — it works in any channel or DM without being invited.
-- **Error display**: "No Markdown files" and `not_in_channel` errors are shown as modal popups (`views.open`) instead of ephemeral messages.
+- **Error display**: All errors and messages are shown as modal popups (`views.open`) instead of ephemeral messages.
 - **KV storage**: Markdown content is stored raw (not pre-rendered HTML). Content ≤60KB is stored inline at `["rc", id]`. Larger content is split into 60KB chunks at `["rc", id, i]` with a `{ chunkCount: N }` manifest at `["rc", id]`. All use the 1h TTL. On demand, `handleViewRender` reads the content and calls `renderMarkdown` to produce HTML.
 - **Multi-file flow**: When multiple `.md` files are attached, a modal picker shows per-file `Render` buttons (no submit button). Clicking a button renders that file and replaces the modal content in-place via `views.update`.
 - **OAuth**: `oauth.ts` imports `{ kv }` and `type { AuthData }` from `./main.ts` with `import type` to avoid circular import issues.
-- **SLACK_SIGNING_SECRET**: optional; when set, `verifySlackRequest` enforces HMAC-SHA256. Bot must be installed with `files:read` user scope for file downloads.
+- **SLACK_SIGNING_SECRET**: optional; when set, `verifySlackRequest` enforces HMAC-SHA256. Bot must be installed with `files:read` bot scope for file downloads. File content is fetched via CDN URL from the payload (no `files.info` call), so the bot works in any channel without being invited.
 
 ## Conventions
 
