@@ -373,6 +373,11 @@ async function showRenderResultsModal(
     blocks.push({
       type: "section",
       text: { type: "mrkdwn", text: warning },
+      accessory: {
+        type: "button",
+        text: { type: "plain_text", text: "Install the App" },
+        url: INSTALL_LINK,
+      },
     });
     blocks.push({ type: "divider" });
   }
@@ -524,7 +529,7 @@ async function handleFileAction(
   }
 
   const warning = tokens.length === 1
-    ? `Some files may show truncated content. <${INSTALL_LINK}|Install the app> for full rendering in all channels.`
+    ? "Some files may show truncated content. Install the app for full rendering in all channels."
     : undefined;
 
   await showRenderResultsModal(payload, [result], [], warning);
@@ -600,7 +605,12 @@ async function handleBlockAction(
       text: {
         type: "mrkdwn",
         text:
-          `Some files may show truncated content. <${INSTALL_LINK}|Install the app> for full rendering in all channels.`,
+          "Some files may show truncated content. Install the app for full rendering in all channels.",
+      },
+      accessory: {
+        type: "button",
+        text: { type: "plain_text", text: "Install the App" },
+        url: INSTALL_LINK,
       },
     });
     resultBlocks.push({ type: "divider" });
