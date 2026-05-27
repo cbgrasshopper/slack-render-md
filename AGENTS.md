@@ -21,8 +21,8 @@ Slack app that renders Markdown files shared in Slack messages as styled HTML pa
 | `renderer.ts` | `renderMarkdown()`, `htmlToSlack()` |
 | `slack-api.ts` | `SlackApi` class wrapping Slack Web API |
 | `oauth.ts` | `OAuthHandler` for Slack OAuth v2 flow |
-| `renderer_test.ts` | 41 tests for both renderer functions |
-| `main_test.ts` | 8 tests for KV content storage/retrieval |
+| `renderer_test.ts` | 43 tests for both renderer functions |
+| `main_test.ts` | 12 tests for KV, auth, and download |
 | `templates/render.html` | Page template (highlight.js with dark/light themes, Mermaid, KaTeX); syntax highlighting only when a language is specified |
 
 ## Commands
@@ -32,14 +32,15 @@ Slack app that renders Markdown files shared in Slack messages as styled HTML pa
 
 ## Testing
 
-### renderer_test.ts (41 tests)
+### renderer_test.ts (43 tests)
 
-- `renderMarkdown` — formatting, code, tables, mermaid, links, lists, task lists, strikethrough, images, blockquotes, HR, empty input, line breaks
+- `renderMarkdown` — formatting, code, tables, mermaid, links, lists, task lists, strikethrough, images, blockquotes, HR, empty input, line breaks, language class for code blocks
 - `htmlToSlack` — inline formatting conversion, block-level conversion, entity decoding, whitespace collapse, length limit, `<pre>` tags, nested formatting
 
-### main_test.ts (8 tests)
+### main_test.ts (12 tests)
 
 - `storeRenderContent` / `loadRenderContent` — small inline, large chunked (>64KB), empty string, boundary at chunk size, just over boundary, unicode content, missing key
+- `downloadFileContent` — token fallback order, CDN success, preview fallback, null handling
 
 ## Key Behaviors
 
@@ -48,7 +49,7 @@ Slack app that renders Markdown files shared in Slack messages as styled HTML pa
 - **KV storage**: Markdown content is stored raw (not pre-rendered HTML). Content ≤60KB is stored inline at `["rc", id]`. Larger content is split into 60KB chunks at `["rc", id, i]` with a `{ chunkCount: N }` manifest at `["rc", id]`. All use the 1h TTL. On demand, `handleViewRender` reads the content and calls `renderMarkdown` to produce HTML.
 - **Multi-file flow**: When multiple `.md` files are attached, a modal picker shows per-file `Render` buttons (no submit button). Clicking a button renders that file and replaces the modal content in-place via `views.update`.
 - **OAuth**: `oauth.ts` imports `{ kv }` and `type { AuthData }` from `./main.ts` with `import type` to avoid circular import issues.
-- **SLACK_SIGNING_SECRET**: optional; when set, `verifySlackRequest` enforces HMAC-SHA256. Bot must be installed with `files:read` bot scope for file downloads. File content is fetched via CDN URL from the payload (no `files.info` call), so the bot works in any channel without being invited.
+- **SLACK_SIGNING_SECRET**: optional; when set, `verifySlackRequest` enforces HMAC-SHA256. Bot must be installed with `files:read` bot scope for file downloads. File content is fetched via CDN URL from the payload (no `files.info` call), so the bot works in any channel without being invited. Falls back to the user's token when the bot's CDN download fails (e.g., private channels the bot hasn't joined).
 
 ## Conventions
 
@@ -60,5 +61,5 @@ Slack app that renders Markdown files shared in Slack messages as styled HTML pa
 - Console.error used for server-side logging
 - Prefer `assertStringIncludes` and `assertEquals` from `@std/assert`
 - When adding new Markdown syntax support, add to both `renderMarkdown` tests and `htmlToSlack` tests
-- Exported from `main.ts`: `kv` (Deno KV handle), `AuthData` interface, `storeRenderContent`, `loadRenderContent`
+- Exported from `main.ts`: `kv` (Deno KV handle), `AuthData` interface, `storeRenderContent`, `loadRenderContent`, `downloadFileContent`
 - Slack request signature verification uses `X-Slack-Signature` with HMAC-SHA256
