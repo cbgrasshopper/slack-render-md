@@ -27,7 +27,7 @@ export class OAuthHandler {
       "files:read",
     ].join(",");
 
-    this.userScopes = [].join(",");
+    this.userScopes = ["files:read"].join(",");
   }
 
   getInstallUrl(): string {
