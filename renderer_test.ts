@@ -93,6 +93,22 @@ Deno.test("renderMarkdown - code without lang", async () => {
   const result = await renderMarkdown(input);
   assertStringIncludes(result, "<pre><code");
   assertStringIncludes(result, "plain code");
+  assertStringIncludes(result, "<code>");
+  assertStringIncludes(result, "</code>");
+});
+
+Deno.test("renderMarkdown - code with lang gets language class", async () => {
+  const input = "```ts\nconst x = 1;\n```";
+  const result = await renderMarkdown(input);
+  assertStringIncludes(result, 'class="language-ts"');
+});
+
+Deno.test("renderMarkdown - code without lang has no language class", async () => {
+  const input = "```\nplain code\n```";
+  const result = await renderMarkdown(input);
+  const codeTag = result.match(/<code[^>]*>/);
+  assertEquals(codeTag !== null, true);
+  assertEquals(codeTag![0].includes("language-"), false);
 });
 
 Deno.test("renderMarkdown - empty input", async () => {

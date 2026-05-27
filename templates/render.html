@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{TITLE}} - slack-render-md</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.5.1/github-markdown.min.css">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -89,7 +90,9 @@
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
   <script>
     document.addEventListener('DOMContentLoaded', () => {
-      hljs.highlightAll();
+      document.querySelectorAll('pre code[class*="language-"]').forEach((block) => {
+        hljs.highlightElement(block);
+      });
       mermaid.initialize({ startOnLoad: true, theme: 'default' });
       try {
         renderMathInElement(document.body, {

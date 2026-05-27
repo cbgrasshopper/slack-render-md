@@ -23,7 +23,7 @@ Slack app that renders Markdown files shared in Slack messages as styled HTML pa
 | `oauth.ts` | `OAuthHandler` for Slack OAuth v2 flow |
 | `renderer_test.ts` | 41 tests for both renderer functions |
 | `main_test.ts` | 8 tests for KV content storage/retrieval |
-| `templates/render.html` | Page template (highlight.js, Mermaid, KaTeX) |
+| `templates/render.html` | Page template (highlight.js with dark/light themes, Mermaid, KaTeX); syntax highlighting only when a language is specified |
 
 ## Commands
 
