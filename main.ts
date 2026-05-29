@@ -276,14 +276,42 @@ export function extractCodeBlocks(
   text: string,
 ): { lang: string; content: string }[] {
   const blocks: { lang: string; content: string }[] = [];
-  const regex = /```(\w*)\n?([\s\S]*?)```/g;
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    const content = match[2].trim();
-    if (content) {
-      blocks.push({ lang: match[1].toLowerCase(), content });
+  const lines = text.split("\n");
+  let i = 0;
+
+  while (i < lines.length) {
+    const openMatch = lines[i].match(/^(```+)(\w*)/);
+    if (openMatch && openMatch[1]) {
+      const lang = openMatch[2].toLowerCase();
+      const contentLines: string[] = [];
+      let depth = 1;
+      i++;
+
+      while (i < lines.length) {
+        const fenceMatch = lines[i].match(/^(```+)/);
+        if (fenceMatch) {
+          const afterFence = lines[i].slice(fenceMatch[1].length).trim();
+          if (afterFence === "") {
+            depth--;
+            if (depth === 0) break;
+          } else {
+            depth++;
+          }
+        }
+        if (depth > 0) {
+          contentLines.push(lines[i]);
+        }
+        i++;
+      }
+
+      const content = contentLines.join("\n").trim();
+      if (content) {
+        blocks.push({ lang, content });
+      }
     }
+    i++;
   }
+
   return blocks;
 }
 

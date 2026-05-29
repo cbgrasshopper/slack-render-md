@@ -209,3 +209,30 @@ Deno.test("extractCodeBlocks - lang is lowercased", () => {
   assertEquals(blocks.length, 1);
   assertEquals(blocks[0].lang, "markdown");
 });
+
+Deno.test("extractCodeBlocks - nested code blocks inside markdown block", () => {
+  const text = [
+    "```markdown",
+    "# Datadog Logs Missing",
+    "",
+    "## Root Cause",
+    "",
+    "```csharp",
+    "var host = new HostBuilder()",
+    "```",
+    "",
+    "```json",
+    '{"key": "value"}',
+    "```",
+    "",
+    "End",
+    "```",
+  ].join("\n");
+  const blocks = extractCodeBlocks(text);
+  assertEquals(blocks.length, 1);
+  assertEquals(blocks[0].lang, "markdown");
+  assertEquals(blocks[0].content.includes("```csharp"), true);
+  assertEquals(blocks[0].content.includes("```json"), true);
+  assertEquals(blocks[0].content.includes("var host = new HostBuilder()"), true);
+  assertEquals(blocks[0].content.includes("End"), true);
+});
