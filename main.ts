@@ -95,6 +95,7 @@ interface MdFile {
 }
 
 const fileCache = new Map<string, { urlPrivate: string; preview: string }>();
+const codeBlockCache = new Map<string, string>();
 
 interface RenderOk {
   ok: true;
@@ -271,6 +272,35 @@ async function findMdFiles(
   });
 }
 
+export function extractCodeBlocks(
+  text: string,
+): { lang: string; content: string }[] {
+  const blocks: { lang: string; content: string }[] = [];
+  const regex = /```(\w*)\n?([\s\S]*?)```/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const content = match[2].trim();
+    if (content) {
+      blocks.push({ lang: match[1].toLowerCase(), content });
+    }
+  }
+  return blocks;
+}
+
+function isMarkdownBlock(lang: string, content: string): boolean {
+  if (lang === "markdown" || lang === "md") return true;
+  if (lang && lang !== "") return false;
+
+  const trimmed = content.trim();
+  return /^#{1,6}\s/m.test(trimmed) ||
+    /^\d+\.\s/m.test(trimmed) ||
+    /^[-*]\s/m.test(trimmed) ||
+    /^>\s/m.test(trimmed) ||
+    /\[.+\]\(.+\)/.test(trimmed) ||
+    /^\|.+\|/m.test(trimmed) ||
+    /^={3,}$|^-{3,}$/m.test(trimmed);
+}
+
 export async function downloadFileContent(
   urlPrivate: string,
   preview: string,
@@ -312,6 +342,29 @@ export async function downloadFileContent(
   return null;
 }
 
+async function renderAndStore(
+  name: string,
+  content: string | null,
+): Promise<RenderResult> {
+  if (!content) {
+    return { ok: false, error: `Could not get content for "${name}".` };
+  }
+
+  const html = await renderMarkdown(content);
+  const id = crypto.randomUUID();
+  const preview = htmlToSlack(html);
+
+  const entry: RenderEntry = {
+    filename: name,
+    preview,
+    created: Date.now(),
+  };
+  await kv.set(["renders", id], entry, { expireIn: RENDER_TTL_MS });
+  await storeRenderContent(id, content);
+
+  return { ok: true, id, preview, filename: name };
+}
+
 async function renderOneFile(
   fileName: string,
   fileId: string,
@@ -321,25 +374,7 @@ async function renderOneFile(
   const content = cached
     ? await downloadFileContent(cached.urlPrivate, cached.preview, tokens)
     : null;
-
-  if (!content) {
-    return { ok: false, error: `Could not get content for "${fileName}".` };
-  }
-
-  const html = await renderMarkdown(content);
-  const id = crypto.randomUUID();
-
-  const preview = htmlToSlack(html);
-
-  const entry: RenderEntry = {
-    filename: fileName,
-    preview,
-    created: Date.now(),
-  };
-  await kv.set(["renders", id], entry, { expireIn: RENDER_TTL_MS });
-  await storeRenderContent(id, content);
-
-  return { ok: true, id, preview, filename: fileName };
+  return renderAndStore(fileName, content);
 }
 
 async function getAuthForUser(userId: string): Promise<AuthData | null> {
@@ -420,10 +455,10 @@ async function showRenderResultsModal(
   await slackApi.openView(triggerId, view);
 }
 
-async function handleFileAction(
+async function handleRenderMarkdown(
   payload: SlackPayloadRecord,
 ): Promise<void> {
-  console.error("=== handleFileAction called ===");
+  console.error("=== handleRenderMarkdown called ===");
 
   const { userId, channelId } = extractUserAndChannelIds(payload);
   console.error("user:", userId, "channel:", channelId);
@@ -439,37 +474,48 @@ async function handleFileAction(
   const userToken = auth?.userToken || "";
   const tokens = userToken ? [SLACK_BOT_TOKEN, userToken] : [SLACK_BOT_TOKEN];
 
-  let mdFiles: MdFile[];
+  let mdFiles: MdFile[] = [];
+  let findFilesError: string | undefined;
   try {
     mdFiles = await findMdFiles(payload);
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error("handleFileAction: findMdFiles error:", msg);
-    if (triggerId) {
-      await slackApi.openView(triggerId, {
-        type: "modal",
-        title: { type: "plain_text", text: "Error" },
-        close: { type: "plain_text", text: "Close" },
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: msg } }],
-      });
-    }
-    return;
+    findFilesError = error instanceof Error ? error.message : String(error);
+    console.error("handleRenderMarkdown: findMdFiles error:", findFilesError);
   }
 
-  if (mdFiles.length === 0) {
-    console.error("handleFileAction: no md files found");
+  const message = payload.message as SlackPayloadRecord | undefined;
+  const text = (message?.text as string) || "";
+  const rawBlocks = extractCodeBlocks(text);
+
+  type Candidate = { type: "file" | "codeblock"; id: string; name: string };
+  const candidates: Candidate[] = [];
+
+  for (const f of mdFiles) {
+    candidates.push({ type: "file", id: f.id, name: f.name });
+  }
+
+  for (const cb of rawBlocks) {
+    if (!isMarkdownBlock(cb.lang, cb.content)) continue;
+    const cbId = crypto.randomUUID();
+    codeBlockCache.set(cbId, cb.content);
+    const firstLine = cb.content.split("\n").find((l) => l.trim()) || "(empty)";
+    const name = firstLine.trim().substring(0, 50);
+    candidates.push({ type: "codeblock", id: cbId, name });
+  }
+
+  if (candidates.length === 0) {
+    console.error("handleRenderMarkdown: no candidates found");
     if (triggerId) {
+      const errorMsg = findFilesError ||
+        "No Markdown files or Markdown code blocks found.";
       await slackApi.openView(triggerId, {
         type: "modal",
-        title: { type: "plain_text", text: "No Markdown Files" },
+        title: { type: "plain_text", text: "No Markdown Found" },
         close: { type: "plain_text", text: "Close" },
         blocks: [
           {
             type: "section",
-            text: {
-              type: "mrkdwn",
-              text: "No Markdown files (.md) found in this message.",
-            },
+            text: { type: "mrkdwn", text: errorMsg },
           },
         ],
       });
@@ -479,28 +525,30 @@ async function handleFileAction(
 
   if (!triggerId) return;
 
-  if (mdFiles.length > 1) {
-    const pickerBlocks = mdFiles.map((f) => ({
+  if (candidates.length > 1) {
+    const pickerBlocks = candidates.map((c) => ({
       type: "section",
-      text: { type: "mrkdwn", text: f.name },
+      text: { type: "mrkdwn", text: c.name },
       accessory: {
         type: "button",
         text: { type: "plain_text", text: "Render" },
-        value: `${f.id}::${f.name}`,
+        value: c.type === "file"
+          ? `file::${c.id}::${c.name}`
+          : `cb::${c.id}::${c.name}`,
         action_id: "pick_file",
       },
     }));
 
     const pickerView = {
       type: "modal",
-      title: { type: "plain_text", text: "Select Markdown File" },
+      title: { type: "plain_text", text: "Select Markdown" },
       close: { type: "plain_text", text: "Cancel" },
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${mdFiles.length} Markdown files found. Choose one:`,
+            text: `${candidates.length} Markdown sources found. Choose one:`,
           },
         },
         { type: "divider" },
@@ -512,7 +560,16 @@ async function handleFileAction(
     return;
   }
 
-  const result = await renderOneFile(mdFiles[0].name, mdFiles[0].id, tokens);
+  const candidate = candidates[0];
+  let result: RenderResult;
+
+  if (candidate.type === "file") {
+    result = await renderOneFile(candidate.name, candidate.id, tokens);
+  } else {
+    const content = codeBlockCache.get(candidate.id) || null;
+    codeBlockCache.delete(candidate.id);
+    result = await renderAndStore(candidate.name, content);
+  }
 
   if (!result.ok) {
     if (triggerId) {
@@ -578,9 +635,10 @@ async function handleBlockAction(
   if (!value) return;
 
   const parts = value.split("::");
-  const fileId = parts[0];
-  const fileName = parts[1] || "";
-  if (!fileId || !fileName) return;
+  const type = parts[0];
+  const sourceId = parts[1];
+  const name = parts.slice(2).join("::");
+  if (!type || !sourceId || !name) return;
 
   const viewPayload = payload.view as SlackPayloadRecord | undefined;
   const viewId = viewPayload?.id as string | undefined;
@@ -595,7 +653,17 @@ async function handleBlockAction(
     if (auth?.userToken) tokens.push(auth.userToken);
   }
 
-  const result = await renderOneFile(fileName, fileId, tokens);
+  let result: RenderResult;
+
+  if (type === "file") {
+    result = await renderOneFile(name, sourceId, tokens);
+  } else if (type === "cb") {
+    const content = codeBlockCache.get(sourceId) || null;
+    codeBlockCache.delete(sourceId);
+    result = await renderAndStore(name, content);
+  } else {
+    return;
+  }
 
   const resultBlocks: unknown[] = [];
 
@@ -694,9 +762,9 @@ async function handleSlackRequest(req: Request): Promise<Response> {
       return new Response("", { status: 200 });
     }
 
-    if (payload.callback_id === "render_md_file") {
-      handleFileAction(payload).catch((err) =>
-        console.error("handleFileAction error:", err)
+    if (payload.callback_id === "render_md") {
+      handleRenderMarkdown(payload).catch((err) =>
+        console.error("handleRenderMarkdown error:", err)
       );
     }
     return new Response("", { status: 200 });

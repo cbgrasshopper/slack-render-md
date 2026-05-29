@@ -4,6 +4,7 @@ import {
   storeRenderContent,
   loadRenderContent,
   downloadFileContent,
+  extractCodeBlocks,
   type AuthData,
 } from "./main.ts";
 
@@ -150,4 +151,61 @@ Deno.test("downloadFileContent - stops after first successful token", async () =
   } finally {
     await server.shutdown();
   }
+});
+
+Deno.test("extractCodeBlocks - single block with lang", () => {
+  const text = "```markdown\n# Hello\n**bold**\n```";
+  const blocks = extractCodeBlocks(text);
+  assertEquals(blocks.length, 1);
+  assertEquals(blocks[0].lang, "markdown");
+  assertEquals(blocks[0].content, "# Hello\n**bold**");
+});
+
+Deno.test("extractCodeBlocks - single block without lang", () => {
+  const text = "```\nplain content\n```";
+  const blocks = extractCodeBlocks(text);
+  assertEquals(blocks.length, 1);
+  assertEquals(blocks[0].lang, "");
+  assertEquals(blocks[0].content, "plain content");
+});
+
+Deno.test("extractCodeBlocks - multiple blocks", () => {
+  const text = "```js\nconst x = 1;\n```\n```markdown\n# Title\n```";
+  const blocks = extractCodeBlocks(text);
+  assertEquals(blocks.length, 2);
+  assertEquals(blocks[0].lang, "js");
+  assertEquals(blocks[1].lang, "markdown");
+  assertEquals(blocks[1].content, "# Title");
+});
+
+Deno.test("extractCodeBlocks - no blocks", () => {
+  const text = "just regular text";
+  const blocks = extractCodeBlocks(text);
+  assertEquals(blocks.length, 0);
+});
+
+Deno.test("extractCodeBlocks - empty input", () => {
+  const blocks = extractCodeBlocks("");
+  assertEquals(blocks.length, 0);
+});
+
+Deno.test("extractCodeBlocks - block with surrounding text", () => {
+  const text = "Check this:\n\n```md\n# Hello\n```\n\nMore text";
+  const blocks = extractCodeBlocks(text);
+  assertEquals(blocks.length, 1);
+  assertEquals(blocks[0].lang, "md");
+  assertEquals(blocks[0].content, "# Hello");
+});
+
+Deno.test("extractCodeBlocks - skips empty blocks", () => {
+  const text = "```\n\n```";
+  const blocks = extractCodeBlocks(text);
+  assertEquals(blocks.length, 0);
+});
+
+Deno.test("extractCodeBlocks - lang is lowercased", () => {
+  const text = "```MarkDown\n# Title\n```";
+  const blocks = extractCodeBlocks(text);
+  assertEquals(blocks.length, 1);
+  assertEquals(blocks[0].lang, "markdown");
 });
