@@ -451,7 +451,7 @@ async function showRenderResultsModal(
       text: {
         type: "mrkdwn",
         text:
-          `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* rendered successfully!\n${result.preview}`,
+          `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* preview (click link for fully rendered version)\n\n${result.preview}`,
       },
     });
     blocks.push({ type: "divider" });
@@ -718,7 +718,7 @@ async function handleBlockAction(
       text: {
         type: "mrkdwn",
         text:
-          `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* rendered successfully!\n${result.preview}`,
+          `*<${RENDERER_BASE}/render/${result.id}|${result.filename}>* preview (click link for fully rendered version)\n\n${result.preview}`,
       },
     });
   } else {
